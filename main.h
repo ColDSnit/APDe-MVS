@@ -1,5 +1,7 @@
 #ifndef _MAIN_H_
 #define _MAIN_H_
+// Ensure std::launch is declared for Boost/NVCC host compilation path
+#include <future>
 // Includes Opencv
 #include <opencv2/calib3d/calib3d.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -11,7 +13,7 @@
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <cuda_runtime_api.h>
-#include <cuda_texture_types.h>
+// #include <cuda_texture_types.h>  // Removed for CUDA 12.8+ Windows compatibility
 #include <curand_kernel.h>
 #include <vector_types.h>
 // Includes STD libs

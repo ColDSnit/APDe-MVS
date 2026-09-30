@@ -1,4 +1,6 @@
 import os
+import subprocess
+from pathlib import Path
 import multiprocessing as mp
 import argparse
 import glob
@@ -32,6 +34,27 @@ parser.add_argument('--export_anchor', action='store_true', default=False)
 parser.add_argument('--export_curve', action='store_true', default=False)
 args = parser.parse_args()
 #####################################################################################################
+def _resolve_apd_executable(apd_path_arg: str) -> Path:
+    """Resolve APD binary path across platforms and raise if not found."""
+    apd_path = Path(apd_path_arg)
+    if not apd_path.is_absolute():
+        apd_path = Path(__file__).resolve().parent / apd_path
+
+    candidates: list[Path] = []
+    if os.name == "nt":
+        # Prefer .exe on Windows when user passed "./build/APD".
+        if apd_path.suffix.lower() != ".exe":
+            candidates.append(apd_path.with_suffix(".exe"))
+        candidates.append(apd_path)
+    else:
+        candidates.append(apd_path)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    checked = ", ".join(str(c) for c in candidates)
+    raise FileNotFoundError(f"APD binary not found. Checked: {checked}")
 
 
 def init(pp, ll):
@@ -79,41 +102,58 @@ def worker(scan):
     if not os.path.exists(APD_path):
         os.makedirs(APD_path)
 
-    call_APD_cmd = \
-         '{} --dense_folder {} --gpu_index {} --dataset {} ' \
-         '--only_fuse {} --no_fuse {}  --use_sa {} --memory_cache {} --flush {} ' \
-         '--export_anchor {} --export_curve {} --export_color {} --use_impetus {} --weak_filter {}'.format(
-            args.APD_path, scan_dir, gpu_index, dataset,
-            'true' if args.only_fuse else 'false',
-            'true' if args.no_fuse else 'false',
-            'false' if args.no_sam else 'true',
-            'true' if args.memory_cache else 'false',
-            'true' if args.flush else 'false',
-            'true' if args.export_anchor else 'false',
-            'true' if args.export_curve else 'false',
-            "false" if args.no_color else "true",
-            "false" if args.no_impetus else "true",
-            "false" if args.no_weak_filter else "true"
-        )
+    apd_exe = _resolve_apd_executable(args.APD_path)
+
+    apd_cmd = [
+        str(apd_exe),
+        "--dense_folder", scan_dir,
+        "--gpu_index", str(gpu_index),
+        "--dataset", dataset,
+        "--only_fuse", "true" if args.only_fuse else "false",
+        "--no_fuse", "true" if args.no_fuse else "false",
+        "--use_sa", "false" if args.no_sam else "true",
+        "--memory_cache", "true" if args.memory_cache else "false",
+        "--flush", "true" if args.flush else "false",
+        "--export_anchor", "true" if args.export_anchor else "false",
+        "--export_curve", "true" if args.export_curve else "false",
+        "--export_color", "false" if args.no_color else "true",
+        "--use_impetus", "false" if args.no_impetus else "true",
+        "--weak_filter", "false" if args.no_weak_filter else "true",
+    ]
 
     log_path = os.path.join(APD_path, 'log.txt')
-    if os.path.exists(log_path):
-        call_APD_cmd += ' >> ' + log_path
-    else:
-        call_APD_cmd += ' > ' + log_path
+    append_log = os.path.exists(log_path)
+    redir = ">>" if append_log else ">"
+    print("{} {} {}".format(" ".join(apd_cmd), redir, log_path))
+
+    def _run_apd_or_raise() -> None:
+        if args.dry_run:
+            return
+        log_mode = "a" if append_log else "w"
+        with open(log_path, log_mode, encoding="utf-8") as log_f:
+            completed = subprocess.run(
+                apd_cmd,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                shell=False,
+                check=False,
+            )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "APD failed for scan '{}' with exit code {}. Log: {}".format(
+                    scan, completed.returncode, log_path
+                )
+            )
 
     if args.resume:
         APD_ply_path = os.path.join(scan_dir, 'APD', 'APD.ply')
         if not os.path.exists(APD_ply_path):
-            print(call_APD_cmd)
-            if not args.dry_run:
-                os.system(call_APD_cmd)
+            _run_apd_or_raise()
         else:
             print('APD result exists for {}'.format(scan_dir))
     else:
-        print(call_APD_cmd)
-        if not args.dry_run:
-            os.system(call_APD_cmd)
+        _run_apd_or_raise()
+
     if  args.backup_code:
         # get current path
         current_path = os.path.dirname(os.path.abspath(__file__))
@@ -180,8 +220,24 @@ if __name__ == "__main__":
     positions = mp.Array('i', [0] * total_work_num)
     lock = mp.Lock()
     pool = mp.Pool(processes=total_work_num, initializer=init, initargs=(positions, lock))
+    async_results = []
     for scan in scans:
-        pool.apply_async(worker, args=(scan,))
+        async_results.append((scan, pool.apply_async(worker, args=(scan,))))
+
     pool.close()
+
+    had_error = False
+    for scan, result in async_results:
+        try:
+            result.get()  # Re-raise worker exceptions in parent process.
+        except Exception as exc:
+            had_error = True
+            print("[ERROR] worker failed for scan '{}': {}".format(scan, exc))
+
     pool.join()
+
+    if had_error:
+        raise SystemExit(1)
+
     print('done')
+
