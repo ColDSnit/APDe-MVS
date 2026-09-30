@@ -32,6 +32,10 @@ parser.add_argument('--TaT_intermediate', action='store_true', default=False)
 parser.add_argument('--TaT_advanced', action='store_true', default=False)
 parser.add_argument('--export_anchor', action='store_true', default=False)
 parser.add_argument('--export_curve', action='store_true', default=False)
+parser.add_argument('--apd_config', type=str, default=None,
+                    help='INI file with APD run-time options, passed to APD as --config')
+parser.add_argument('--apd_opt', type=str, action='append', default=[], metavar='GROUP.KEY=VALUE',
+                    help='single APD run-time option, e.g. fusion.depth_mode=absolute; repeatable, overrides --apd_config')
 args = parser.parse_args()
 #####################################################################################################
 def _resolve_apd_executable(apd_path_arg: str) -> Path:
@@ -120,6 +124,15 @@ def worker(scan):
         "--use_impetus", "false" if args.no_impetus else "true",
         "--weak_filter", "false" if args.no_weak_filter else "true",
     ]
+    # Run-time options of the configurable APD build; an unmodified APD binary would reject them.
+    if args.apd_config:
+        apd_cmd += ["--config", str(Path(args.apd_config).resolve())]
+    for item in args.apd_opt:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip():
+            raise ValueError("--apd_opt expects GROUP.KEY=VALUE, got '{}'".format(item))
+        # "--key=value" in one token, so that negative numbers are not mistaken for options
+        apd_cmd.append("--{}={}".format(key.strip(), value.strip()))
 
     log_path = os.path.join(APD_path, 'log.txt')
     append_log = os.path.exists(log_path)

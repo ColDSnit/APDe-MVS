@@ -38,8 +38,16 @@ void RunFusion(
         const std::vector<Problem> &problems,
         const std::string &name = "APD.ply",
         bool weak_filter = true,
-        bool export_color = true
+        bool export_color = true,
+        const FusionParams &fusion = FusionParams(),
+        const WeakFilterParams &weak_filter_params = WeakFilterParams()
     );
+
+// Angle in degrees between the optical axes of two cameras.
+float OpticalAxisAngleDeg(const Camera &a, const Camera &b);
+
+// True when a source view passes the optional optical-axis angle window (a bound < 0 is disabled).
+bool ViewAngleAllowed(const Camera &ref, const Camera &src, float min_deg, float max_deg);
 
 void RunFusion_TAT_A(
         const path &dense_folder,

@@ -583,7 +583,7 @@ __device__ float ComputeBilateralNCCNew(
                 strong_cost += strong_costs_weight[i] * strong_costs[i];
             }
             strong_cost = MIN(strong_cost, cost_max);
-            cost = 0.25 * center_cost + 0.75 * strong_cost;
+            cost = params->weak_center_weight * center_cost + (1.0 - params->weak_center_weight) * strong_cost;
         }
     }
     else {
@@ -872,7 +872,7 @@ __device__ float ComputeGeomConsistencyCost(
 	const Camera& src_camera = helper->cameras_cuda[src_idx];
 	const cudaTextureObject_t depth_image = helper->texture_depths_cuda[0].images[src_idx];
 
-	const float max_cost = 3.0f;
+	const float max_cost = helper->params->geom_max_cost;
 
 	float center_cost = 0.0f;
 	{
@@ -913,7 +913,9 @@ __global__ void InitRandomStates(
 		return;
 	}
 	const int center = p.y * width + p.x;
-	curand_init(clock64(), p.y, p.x, &rand_states[center]);
+	// rng_seed < 0 keeps the upstream clock seed (runs differ); a fixed seed makes a run repeatable
+	const long long rng_seed = helper->params->rng_seed;
+	curand_init(rng_seed < 0 ? clock64() : rng_seed, p.y, p.x, &rand_states[center]);
 }
 
 __global__ void RandomInitialization(
@@ -958,8 +960,8 @@ __device__ void PlaneHypothesisRefinementStrong(
 	DataPassHelper* helper
 
 ) {
-	float depth_perturbation = 0.02f;
-	float normal_perturbation = 0.02f;
+	float depth_perturbation = helper->params->depth_perturbation;
+	float normal_perturbation = helper->params->normal_perturbation;
 	const Camera* cameras = helper->cameras_cuda;
 	const PatchMatchParams* params = helper->params;
 	float depth_min = params->depth_min;
@@ -1016,8 +1018,8 @@ __device__ void PlaneHypothesisRefinementWeak(
 	DataPassHelper* helper
 
 ) {
-	float depth_perturbation = 0.02f;
-	float normal_perturbation = 0.02f;
+	float depth_perturbation = helper->params->depth_perturbation;
+	float normal_perturbation = helper->params->normal_perturbation;
 	const Camera* cameras = helper->cameras_cuda;
 	const PatchMatchParams* params = helper->params;
 	float depth_min = params->depth_min;
@@ -1327,41 +1329,41 @@ __device__ void CheckerboardPropagationStrong(
 		if (flag[2 * i]) {
 			for (int j = 0; j < num_images - 1; ++j) {
 				if (isSet(selected_views[neighbor_positions[i]], j) == 1) {
-					view_selection_priors[j] += 0.9f;
+					view_selection_priors[j] += params->vs_prior_selected;
 				}
 				else {
-					view_selection_priors[j] += 0.1f;
+					view_selection_priors[j] += params->vs_prior_unselected;
 				}
 			}
 		}
 	}
 
 	float sampling_probs[32] = { 0.0f };
-	float cost_threshold = 0.8 * expf((iter) * (iter) / (-90.0f));
+	float cost_threshold = params->vs_cost_thresh_init * expf((iter) * (iter) / (-params->vs_cost_thresh_decay));
 	for (int i = 0; i < num_images - 1; i++) {
 		float count = 0;
 		int count_false = 0;
 		float tmpw = 0;
 		for (int j = 0; j < 8; j++) {
 			if (cost_array[j][i] < cost_threshold) {
-				tmpw += expf(cost_array[j][i] * cost_array[j][i] / (-0.18f));
+				tmpw += expf(cost_array[j][i] * cost_array[j][i] / (-params->vs_good_sigma));
 				count++;
 			}
-			if (cost_array[j][i] > 1.2f) {
+			if (cost_array[j][i] > params->vs_bad_cost) {
 				count_false++;
 			}
 		}
-		if (count > 2 && count_false < 3) {
+		if (count > params->vs_min_good && count_false < params->vs_max_bad) {
 			sampling_probs[i] = tmpw / count;
 		}
-		else if (count_false < 3) {
-			sampling_probs[i] = expf(cost_threshold * cost_threshold / (-0.32f));
+		else if (count_false < params->vs_max_bad) {
+			sampling_probs[i] = expf(cost_threshold * cost_threshold / (-params->vs_fallback_sigma));
 		}
 		sampling_probs[i] = sampling_probs[i] * view_selection_priors[i];
 	}
 
 	TransformPDFToCDF(sampling_probs, num_images - 1);
-	for (int sample = 0; sample < 15; ++sample) {
+	for (int sample = 0; sample < params->vs_num_samples; ++sample) {
 		const float rand_prob = curand_uniform(&rand_states[center]) - FLT_EPSILON;
 
 		for (int image_id = 0; image_id < num_images - 1; ++image_id) {
@@ -1428,7 +1430,7 @@ __device__ void CheckerboardPropagationStrong(
 	PlaneHypothesisRefinementStrong(&plane_hypotheses_now, &depth_now, &cost_now, &rand_states[center], view_weights, weight_norm, p, helper);
 
 	if (params->state == REFINE_INIT) {
-		if (cost_now < costs[center] - 0.1) {
+		if (cost_now < costs[center] - params->refine_init_margin) {
 			costs[center] = cost_now;
 			plane_hypotheses[center] = plane_hypotheses_now;
 		}
@@ -1494,40 +1496,40 @@ __device__ void CheckerboardPropagationWeak(
 		}
 		for (int j = 0; j < num_images - 1; ++j) {
 			if (isSet(selected_views[anchor_pt.x + anchor_pt.y * width], j) == 1) {
-				view_selection_priors[j] += 0.9f;
+				view_selection_priors[j] += params->vs_prior_selected;
 			}
 			else {
-				view_selection_priors[j] += 0.1f;
+				view_selection_priors[j] += params->vs_prior_unselected;
 			}
 		}
 	}
 
 	float sampling_probs[32] = { 0.0f };
-	float cost_threshold = 0.8 * expf((iter) * (iter) / (-90.0f));
+	float cost_threshold = params->vs_cost_thresh_init * expf((iter) * (iter) / (-params->vs_cost_thresh_decay));
 	for (int i = 0; i < num_images - 1; i++) {
 		float count = 0;
 		int count_false = 0;
 		float tmpw = 0;
 		for (int j = 0; j < 8; j++) {
 			if (cost_array[j][i] < cost_threshold) {
-				tmpw += expf(cost_array[j][i] * cost_array[j][i] / (-0.18f));
+				tmpw += expf(cost_array[j][i] * cost_array[j][i] / (-params->vs_good_sigma));
 				count++;
 			}
-			if (cost_array[j][i] > 1.2f) {
+			if (cost_array[j][i] > params->vs_bad_cost) {
 				count_false++;
 			}
 		}
-		if (count > 2 && count_false < 3) {
+		if (count > params->vs_min_good && count_false < params->vs_max_bad) {
 			sampling_probs[i] = tmpw / count;
 		}
-		else if (count_false < 3) {
-			sampling_probs[i] = expf(cost_threshold * cost_threshold / (-0.32f));
+		else if (count_false < params->vs_max_bad) {
+			sampling_probs[i] = expf(cost_threshold * cost_threshold / (-params->vs_fallback_sigma));
 		}
 		sampling_probs[i] = sampling_probs[i] * view_selection_priors[i];
 	}
 
 	TransformPDFToCDF(sampling_probs, num_images - 1);
-	for (int sample = 0; sample < 15; ++sample) {
+	for (int sample = 0; sample < params->vs_num_samples; ++sample) {
 		const float rand_prob = curand_uniform(&rand_states[center]) - FLT_EPSILON;
 
 		for (int image_id = 0; image_id < num_images - 1; ++image_id) {
@@ -1561,7 +1563,7 @@ __device__ void CheckerboardPropagationWeak(
 						final_costs[i] += view_weights[j] * (cost_array[i][j] + params->geom_factor * ComputeGeomConsistencyCost(p, j + 1, plane_hypotheses[positions[i]], helper));
 					}
 					else {
-						final_costs[i] += view_weights[j] * (cost_array[i][j] + params->geom_factor * 3.0f);
+						final_costs[i] += view_weights[j] * (cost_array[i][j] + params->geom_factor * params->geom_max_cost);
 					}
 				}
 				else {
@@ -1603,7 +1605,7 @@ __device__ void CheckerboardPropagationWeak(
 	PlaneHypothesisRefinementWeak(&plane_hypotheses_now, &depth_now, &cost_now, &rand_states[center], view_weights, weight_norm, p, helper);
 
 	if (params->state == REFINE_INIT) {
-		if (cost_now < costs[center] - 0.1) {
+		if (cost_now < costs[center] - params->refine_init_margin) {
 			costs[center] = cost_now;
 			plane_hypotheses[center] = plane_hypotheses_now;
 		}
@@ -1868,7 +1870,7 @@ __global__ void GenAnchors(
 	if (weak_info[center] != WEAK) {
 		return;
 	}
-	const int min_margin = 6;
+	const int min_margin = helper->params->border_margin;
 	const float depth_diff = helper->params->depth_max - helper->params->depth_min;
 	const int* anchors_map = helper->anchors_map_cuda;
 	const PatchMatchParams* params = helper->params;
@@ -1987,7 +1989,7 @@ __global__ void GenAnchors(
 		}
 	}
 	{	// RANSAC to find a good plane
-		int iteration = 50;
+		int iteration = params->anchor_ransac_iters;
 		float min_cost = FLT_MAX;
 		int max_count = 3;
 		while (iteration--) {
@@ -2025,7 +2027,7 @@ __global__ void GenAnchors(
 					strong_dist += distance;
 				}
 			}
-			if (temp_count < 6) {
+			if (temp_count < params->anchor_min_inliers) {
 				continue;
 			}
 			if (temp_count > max_count) {
@@ -2108,7 +2110,7 @@ __global__ void DepthToWeak(DataPassHelper *helper, float *reliable_curve) {
 		return;
 	}
 
-	const int min_margin = 6;
+	const int min_margin = helper->params->border_margin;
 	const int center = point.x + point.y * width;
 
 	if (point.x < min_margin || point.y < min_margin || point.x >= width - min_margin || point.y >= height - min_margin) {
@@ -2217,13 +2219,13 @@ __global__ void DepthToWeak(DataPassHelper *helper, float *reliable_curve) {
 		}
 	}
 
-	if (abs(min_peak - radius) > helper->params->weak_peak_radius || p_costs[min_peak] > 0.5f) {
+	if (abs(min_peak - radius) > helper->params->weak_peak_radius || p_costs[min_peak] > helper->params->weak_max_peak_cost) {
 		helper->weak_info_cuda[center] = WEAK;
 		return;
 	}
 
 	if (peak_count == 1) {
-		if (p_costs[min_peak] <= 0.15f) {
+		if (p_costs[min_peak] <= helper->params->strong_single_peak_cost) {
 			helper->weak_info_cuda[center] = STRONG;
 		}
 		else {
@@ -2242,7 +2244,7 @@ __global__ void DepthToWeak(DataPassHelper *helper, float *reliable_curve) {
 	var = sqrtf(var);
 	var /= (peak_count - 1);
 
-	if (var > 0.2f) {
+	if (var > helper->params->strong_multi_peak_var) {
 		helper->weak_info_cuda[center] = STRONG;
 	} else {
 		helper->weak_info_cuda[center] = WEAK;
@@ -2260,7 +2262,7 @@ __global__ void WeakFilter(DataPassHelper *helper, uchar *weak_info_copy) {
     if (helper->weak_info_cuda[center] != STRONG) {
         return;
     }
-    const int radius = 2;
+    const int radius = helper->params->weak_filter_radius;
     for (int x = - radius; x <= radius; ++x) {
         for (int y = - radius; y <= radius; ++y) {
             if (x == 0 && y == 0) {
@@ -2301,9 +2303,9 @@ __global__ void ConfidenceCompute(DataPassHelper *helper) {
     }
     const float3 forward_point = Get3DPointonWorld_cu(point.x, point.y, ref_depth, ref_camera);
     int num_consistence = 1; // init with 1
-    const int exist_in_src_weight = 1;
-    const int reproj_pixel_weight = 2;
-    const int reproj_depth_weight = 2;
+    const int exist_in_src_weight = params->conf_w_exist;
+    const int reproj_pixel_weight = params->conf_w_reproj;
+    const int reproj_depth_weight = params->conf_w_depth;
 
     for (int i = 0; i < params->num_images - 1; ++i) {
         if (!isSet(selected_view, i)) {
@@ -2329,11 +2331,11 @@ __global__ void ConfidenceCompute(DataPassHelper *helper) {
         const float diff_col = point.x - backward_point.x;
         const float diff_row = point.y - backward_point.y;
         const float pixel_diff = sqrtf(diff_col * diff_col + diff_row * diff_row);
-        if (pixel_diff <= 2.0f) {
+        if (pixel_diff <= params->conf_reproj_px) {
             num_consistence += reproj_pixel_weight;
         }
         const float relative_depth_diff = fabsf(ref_depth - ref_d) / ref_depth;
-        if (relative_depth_diff <= 0.02f) {
+        if (relative_depth_diff <= params->conf_depth_rel) {
             num_consistence += reproj_depth_weight;
         }
     }
@@ -2399,7 +2401,7 @@ __global__ void LocalRefine(DataPassHelper* helper) {
 	base_line /= valid_src;
 
 	float disp = cameras[0].K[0] * base_line / origin_depth;
-	const int radius = 5;
+	const int radius = helper->params->local_refine_radius;
 
 	float min_cost = 2.0f;
 	float best_depth = origin_depth;
@@ -2426,7 +2428,7 @@ __global__ void LocalRefine(DataPassHelper* helper) {
 			best_depth = p_depth;
 		}
 	}
-	if (cost_now - min_cost > 0.1) {
+	if (cost_now - min_cost > helper->params->local_refine_margin) {
 		helper->plane_hypotheses_cuda[center].w = best_depth;
 	}
 }
@@ -2450,7 +2452,7 @@ __global__ void FindNearestStrongPoint(DataPassHelper* helper) {
         uchar best_confidence = 0;
         short2 best_point = make_short2(-1, -1);
         float min_dist = FLT_MAX;
-        const int radius = 100;
+        const int radius = helper->params->nearest_strong_radius;
         for (int x = -radius; x <= radius; ++x) {
             for (int y = -radius; y <= radius; ++y) {
                 short2 temp_point = make_short2(point.x + x, point.y + y);
@@ -2527,7 +2529,7 @@ __global__ void RANSACToGetFitPlane(DataPassHelper* helper) {
 		return;
 	}
 
-	int iteration = 50;
+	int iteration = helper->params->fit_ransac_iters;
 	float min_cost = FLT_MAX;
 	float4 best_plane;
 	bool has_best_plane = false;
@@ -2708,8 +2710,10 @@ void APD::RunPatchMatch() {
 	}
 
 	GetDepthandNormal << <grid_size_full, block_size_full >> > (helper_cuda);
-	BlackPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);
-	RedPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);
+	if (params_host.median_filter) {
+		BlackPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);
+		RedPixelFilterStrong << <grid_size_half, block_size_half >> > (helper_cuda);
+	}
 	float *reliable_curve_cuda = nullptr;
 	if (problem.export_reliable_curve) {
 		cudaMalloc((void**)(&reliable_curve_cuda), sizeof(float) * width * height * RELIABLE_CURVE_SAMPLE_NUM);
@@ -2726,7 +2730,9 @@ void APD::RunPatchMatch() {
     if (problem.params.geom_consistency || problem.params.use_APD) {
         ConfidenceCompute << < grid_size_full, block_size_full >> > (helper_cuda);
     }
-    LocalRefine << <grid_size_full, block_size_full >> > (helper_cuda);
+    if (params_host.local_refine) {
+        LocalRefine << <grid_size_full, block_size_full >> > (helper_cuda);
+    }
 
 	CUDA_SAFE_CALL(cudaDeviceSynchronize());
 	cudaMemcpy(plane_hypotheses_host.get(), plane_hypotheses_cuda, sizeof(float4) * width * height, cudaMemcpyDeviceToHost);

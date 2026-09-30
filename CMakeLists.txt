@@ -56,6 +56,9 @@ find_package(CUDAToolkit REQUIRED)
 # -------------------------------
 add_executable(APD
   main.h
+  apd_options.h
+  apd_config.h
+  apd_config.cpp
   APD.h
   APD.cpp
   APD.cu

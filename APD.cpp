@@ -551,8 +551,13 @@ void APD::InuputInitialization() {
     }
     // =================================================
     // set some params
-    params_host.depth_min = cameras[0].depth_min * 0.6f;
-    params_host.depth_max = cameras[0].depth_max * 1.2f;
+    params_host.depth_min = cameras[0].depth_min * problem.range_scale_min;
+    params_host.depth_max = cameras[0].depth_max * problem.range_scale_max;
+    if (problem.range_pad != 0.0f) {
+        // absolute widening; useful when depths are metres away and the object is millimetres deep
+        params_host.depth_min -= problem.range_pad;
+        params_host.depth_max += problem.range_pad;
+    }
     params_host.num_images = (int) images.size();
     num_images = (int) images.size();
     // =================================================
@@ -966,7 +971,8 @@ void WeakVisFilter(
         const std::vector<cv::Mat> &weaks,
         const std::vector<cv::Mat> &confidences,
         const path &dense_folder,
-        std::vector<cv::Mat> &skip_weaks
+        std::vector<cv::Mat> &skip_weaks,
+        const WeakFilterParams &wf = WeakFilterParams()
 ) {
     const int num_images = cameras.size();
     const auto task = [&](int ref_index) {
@@ -988,7 +994,7 @@ void WeakVisFilter(
                         cv::Vec3f b(src_cam.c[0] - PointX.x, src_cam.c[1] - PointX.y, src_cam.c[2] - PointX.z);
                         float angle = GetAngle(a, b);
                         angle = angle * 180.0f / M_PI;  // convert to degree
-                        if (angle > 80.0f) {
+                        if (angle > wf.max_view_angle_deg) {
                             continue;
                         }
                         float2 point;
@@ -1002,21 +1008,30 @@ void WeakVisFilter(
                         const int src_rows = depths[src_index].rows;
                         if (src_c >= 0 && src_c < src_cols && src_r >= 0 && src_r < src_rows) {
                             float src_depth = depths[src_index].at<float>(src_r, src_c);
+                            // margin by which the point must lie in front of the source surface
+                            const float margin = (wf.depth_mode == DEPTH_TEST_ABSOLUTE ? wf.depth_abs
+                                                                                       : wf.depth_rel * src_depth);
                             if (weaks[src_index].at<uchar>(src_r, src_c) == STRONG) {
-                                if (proj_depth < src_depth - 0.01f * src_depth) {
+                                if (proj_depth < src_depth - margin) {
                                     strong_occluded++;
                                 }
                             } else if (weaks[src_index].at<uchar>(src_r, src_c) == WEAK) {
-                                if (confidences[src_index].at<float>(src_r, src_c) <
-                                    confidences[ref_index].at<float>(r, c)) {
-                                    if (proj_depth < src_depth - 0.01f * src_depth) {
+                                // Upstream reads the uchar confidence map as float; kept as the default so
+                                // results match, confidence_as_uchar=true compares the stored values instead.
+                                const bool src_less_confident = wf.confidence_as_uchar
+                                        ? (confidences[src_index].at<uchar>(src_r, src_c) <
+                                           confidences[ref_index].at<uchar>(r, c))
+                                        : (confidences[src_index].at<float>(src_r, src_c) <
+                                           confidences[ref_index].at<float>(r, c));
+                                if (src_less_confident) {
+                                    if (proj_depth < src_depth - margin) {
                                         weak_occluded++;
                                     }
                                 }
                             }
                         }
                     }
-                    if (strong_occluded >= 2 || weak_occluded >= 4) {
+                    if (strong_occluded >= wf.strong_occluded_min || weak_occluded >= wf.weak_occluded_min) {
                         skip_weaks[ref_index].at<uchar>(r, c) = 1;
                         continue;
                     }
@@ -1048,12 +1063,35 @@ void WeakVisFilter(
     }
 }
 
+float OpticalAxisAngleDeg(const Camera &a, const Camera &b) {
+    // The third row of R is the camera's viewing direction expressed in world coordinates.
+    double dot = double(a.R[6]) * b.R[6] + double(a.R[7]) * b.R[7] + double(a.R[8]) * b.R[8];
+    dot = std::max(-1.0, std::min(1.0, dot));  // guard acos against rounding just outside [-1, 1]
+    return static_cast<float>(std::acos(dot) * 180.0 / M_PI);
+}
+
+bool ViewAngleAllowed(const Camera &ref, const Camera &src, float min_deg, float max_deg) {
+    if (min_deg < 0.0f && max_deg < 0.0f) {
+        return true;  // window switched off
+    }
+    const float angle = OpticalAxisAngleDeg(ref, src);
+    if (min_deg >= 0.0f && angle < min_deg) {
+        return false;
+    }
+    if (max_deg >= 0.0f && angle > max_deg) {
+        return false;
+    }
+    return true;
+}
+
 void RunFusion(
     const path &dense_folder,
     const std::vector<Problem> &problems,
     const std::string &name,
     bool weak_filter,
-    bool export_color
+    bool export_color,
+    const FusionParams &fp,
+    const WeakFilterParams &wf
 ) {
     int num_images = problems.size();
     path image_folder = dense_folder / path("images");
@@ -1131,11 +1169,12 @@ void RunFusion(
     }
 
     if (weak_filter) {
-        WeakVisFilter(problems, cameras, depths, weaks, confidences, dense_folder, skip_weaks);
+        WeakVisFilter(problems, cameras, depths, weaks, confidences, dense_folder, skip_weaks, wf);
     }
 
     std::vector<PointList> PointCloud;
     PointCloud.clear();
+    const bool use_angle_window = (fp.view_min_angle_deg >= 0.0f || fp.view_max_angle_deg >= 0.0f);
 
     for (int i = 0; i < num_images; ++i) {
         std::cout << "Fusing image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
@@ -1144,6 +1183,15 @@ void RunFusion(
         const int cols = depths[ref_index].cols;
         const int rows = depths[ref_index].rows;
         int num_ngb = problem.src_image_ids.size();
+        // optional optical-axis angle window: decided once per (reference, source) pair
+        std::vector<char> src_allowed(num_ngb, 1);
+        if (use_angle_window) {
+            for (int j = 0; j < num_ngb; ++j) {
+                int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+                src_allowed[j] = ViewAngleAllowed(cameras[ref_index], cameras[src_index], fp.view_min_angle_deg,
+                                                  fp.view_max_angle_deg) ? 1 : 0;
+            }
+        }
         for (int r = 0; r < rows; ++r) {
             for (int c = 0; c < cols; ++c) {
                 if (masks[ref_index].at<uchar>(r, c) == 1) {
@@ -1164,6 +1212,8 @@ void RunFusion(
                 float dynamic_consistency = 0.0f;
                 std::vector<int2> used_list(num_ngb, make_int2(-1, -1));
                 for (int j = 0; j < num_ngb; ++j) {
+                    if (!src_allowed[j])
+                        continue;
                     int src_index = imageIdToindexMap[problem.src_image_ids[j]];
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
@@ -1184,19 +1234,56 @@ void RunFusion(
                         ProjectCamera(tmp_X, cameras[ref_index], tmp_pt, proj_depth);
                         float reproj_error = sqrt(pow(c - tmp_pt.x, 2) + pow(r - tmp_pt.y, 2));
                         float relative_depth_diff = fabs(proj_depth - ref_depth) / ref_depth;
-                        float angle = GetAngle(ref_normal, src_normal);
+                        // normals.bin holds world-frame normals (GetDepthandNormal rotates them), so this
+                        // comparison is valid for any angle between the two cameras
+                        float angle = fp.normal_test ? GetAngle(ref_normal, src_normal) : 0.0f;
 
-                        if (reproj_error < 2.0f && relative_depth_diff < 0.01f && angle < 0.174533f) {
+                        // depth agreement: depth_ok gates the match, depth_score enters the consistency score
+                        bool depth_ok = true;
+                        float depth_score = 0.0f;
+                        if (fp.depth_mode == DEPTH_TEST_RELATIVE) {
+                            depth_ok = relative_depth_diff < fp.depth_rel;
+                            depth_score = fp.score_w_depth * relative_depth_diff;
+                        } else if (fp.depth_mode == DEPTH_TEST_ABSOLUTE) {
+                            const float abs_diff = fabs(proj_depth - ref_depth);  // world units along the ref axis
+                            depth_ok = abs_diff < fp.depth_abs;
+                            depth_score = fp.score_w_depth_scaled * abs_diff / fp.depth_abs;
+                        } else if (fp.depth_mode == DEPTH_TEST_PIXEL) {
+                            // move the reference pixel to the depth the source view proposes and measure how
+                            // far its projection into the source image shifts
+                            float3 shifted_X = Get3DPointonWorld(c, r, proj_depth, cameras[ref_index]);
+                            float2 shifted_pt;
+                            float shifted_depth;
+                            ProjectCamera(shifted_X, cameras[src_index], shifted_pt, shifted_depth);
+                            const float px_shift = sqrt(pow(point.x - shifted_pt.x, 2) +
+                                                        pow(point.y - shifted_pt.y, 2));
+                            depth_ok = px_shift < fp.depth_px;
+                            depth_score = fp.score_w_depth_scaled * px_shift / fp.depth_px;
+                        }
+
+                        if (reproj_error < fp.reproj_px && depth_ok && angle < fp.normal_max_rad) {
                             used_list[j].x = src_c;
                             used_list[j].y = src_r;
-                            float tmp_index = reproj_error + 200 * relative_depth_diff + angle * 10;
+                            float tmp_index = fp.score_w_reproj * reproj_error + depth_score +
+                                              angle * fp.score_w_normal;
                             dynamic_consistency += exp(-tmp_index);
                             num_consistent++;
+                            if (fp.average_position) {
+                                consistent_Point.x += tmp_X.x;
+                                consistent_Point.y += tmp_X.y;
+                                consistent_Point.z += tmp_X.z;
+                            }
                         }
                     }
                 }
-                float factor = (weaks[ref_index].at<uchar>(r, c) == WEAK ? 0.45f : 0.3f);
-                if (num_consistent >= 1 && (dynamic_consistency > factor * num_consistent)) {
+                float factor = (weaks[ref_index].at<uchar>(r, c) == WEAK ? fp.score_thresh_weak
+                                                                         : fp.score_thresh_strong);
+                if (num_consistent >= fp.min_consistent && (dynamic_consistency > factor * num_consistent)) {
+                    if (fp.average_position) {
+                        consistent_Point.x /= (num_consistent + 1);
+                        consistent_Point.y /= (num_consistent + 1);
+                        consistent_Point.z /= (num_consistent + 1);
+                    }
                     PointList point3D;
                     point3D.coord = consistent_Point;
                     float consistent_Color[3] = {(float) images[ref_index].at<cv::Vec3b>(r, c)[0],
@@ -1206,7 +1293,9 @@ void RunFusion(
                         if (used_list[j].x == -1)
                             continue;
                         int src_index = imageIdToindexMap[problem.src_image_ids[j]];
-                        masks[src_index].at<uchar>(used_list[j].y, used_list[j].x) = 1;
+                        if (fp.mask_used_pixels) {
+                            masks[src_index].at<uchar>(used_list[j].y, used_list[j].x) = 1;
+                        }
                         const auto &color = images[src_index].at<cv::Vec3b>(used_list[j].y, used_list[j].x);
                         consistent_Color[0] += color[0];
                         consistent_Color[1] += color[1];

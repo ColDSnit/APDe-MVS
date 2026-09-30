@@ -37,6 +37,8 @@
 #include <boost/program_options.hpp>
 // Includes ThreadPool
 #include "ThreadPool.h"
+// Includes the host-side option structs (fusion, weak filter, pipeline schedule)
+#include "apd_options.h"
 
 // Define some const var
 #define MAX_IMAGES 32
@@ -99,6 +101,49 @@ struct PatchMatchParams {
     float geom_factor = 0.2f; // eth
      // float geom_factor = 0.05f; // tat
     RunState state;
+    // ---- run-time configurable kernel constants; every default is the upstream literal ----
+    float geom_max_cost = 3.0f;            // cap of the geometric consistency cost (pixels)
+    float depth_perturbation = 0.02f;      // relative depth perturbation in hypothesis refinement
+    float normal_perturbation = 0.02f;     // normal perturbation in hypothesis refinement (fraction of pi)
+    float vs_prior_selected = 0.9f;        // view-selection prior when a neighbour selected the view
+    float vs_prior_unselected = 0.1f;      // view-selection prior otherwise
+    double vs_cost_thresh_init = 0.8;      // good-cost threshold = init * exp(-iter^2 / decay)
+    float vs_cost_thresh_decay = 90.0f;
+    float vs_good_sigma = 0.18f;           // weight of a good cost = exp(-cost^2 / sigma)
+    float vs_fallback_sigma = 0.32f;       // weight when too few good costs = exp(-threshold^2 / sigma)
+    float vs_bad_cost = 1.2f;              // NCC cost above which a hypothesis counts as bad for a view
+    int vs_min_good = 2;                   // more than this many good hypotheses are needed
+    int vs_max_bad = 3;                    // fewer than this many bad hypotheses are allowed
+    int vs_num_samples = 15;               // Monte-Carlo view samples per pixel (<= 255)
+    double refine_init_margin = 0.1;       // cost improvement required to accept a change in REFINE_INIT
+    double weak_center_weight = 0.25;      // deformable NCC = w * centre patch + (1 - w) * anchor patches
+    int border_margin = 6;                 // image border (pixels) never classified or used as anchor
+    float weak_max_peak_cost = 0.5f;       // cost-curve minimum above this => WEAK
+    float strong_single_peak_cost = 0.15f; // single-peak curve below this => STRONG
+    float strong_multi_peak_var = 0.2f;    // multi-peak curve with peak spread above this => STRONG
+    int weak_filter_radius = 2;            // isolated-STRONG removal window radius
+    float conf_reproj_px = 2.0f;           // confidence: reprojection tolerance (pixels)
+    float conf_depth_rel = 0.02f;          // confidence: relative depth tolerance
+    int conf_w_exist = 1;                  // confidence votes: source depth exists
+    int conf_w_reproj = 2;                 // confidence votes: reprojection test passed
+    int conf_w_depth = 2;                  // confidence votes: depth test passed
+    bool local_refine = true;              // run the final disparity-step depth refinement
+    int local_refine_radius = 5;           // refinement search radius in disparity steps
+    double local_refine_margin = 0.1;      // cost improvement required to accept the refined depth
+    int nearest_strong_radius = 100;       // search radius (pixels) for the nearest STRONG pixel
+    int anchor_ransac_iters = 50;          // RANSAC iterations when choosing anchors
+    int anchor_min_inliers = 6;            // minimum inliers of the anchor plane
+    int fit_ransac_iters = 50;             // RANSAC iterations of the per-iteration plane fit
+    bool median_filter = true;             // run the checkerboard median depth filter on STRONG pixels
+    long long rng_seed = -1;               // <0: seed from the clock (upstream); >=0: reproducible seed
+};
+
+// Everything that can be changed at run time, gathered for the option registry (apd_config.cpp).
+struct RuntimeConfig {
+    FusionParams fusion;
+    WeakFilterParams weak_filter;
+    PipelineParams pipeline;
+    PatchMatchParams pm;
 };
 
 struct Problem {
@@ -107,6 +152,9 @@ struct Problem {
     path dense_folder;
     path result_folder;
     int scale_size = 1;
+    float range_scale_min = 0.6f;  // depth search range = cam file range scaled by these two factors
+    float range_scale_max = 1.2f;
+    float range_pad = 0.0f;        // world units added to both ends of the scaled range
     PatchMatchParams params;
     bool show_medium_result = false;
     bool export_anchor = false;
