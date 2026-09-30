@@ -17,6 +17,9 @@ bool ReadBinMat(const path &mat_path, cv::Mat &mat);
 
 bool WriteBinMat(const path &mat_path, const cv::Mat &mat, bool flush = false);
 
+// Sets the projection model that ReadCamera stamps on every camera; call once before any camera is read.
+void SetCameraModel(const PipelineParams &pipeline);
+
 bool ReadCamera(const path &cam_path, Camera &cam);
 
 bool ReadImage(const path &img_path, cv::Mat &img);

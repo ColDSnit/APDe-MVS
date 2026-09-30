@@ -65,6 +65,8 @@ struct PipelineParams {
     float geom_factor = -1.0f;             // <0 keeps the dataset default (0.2, or 0.05 for Tanks and Temples)
     float range_scale_min = 0.6f;          // depth search range = [file_min * this, file_max * range_scale_max]
     float range_scale_max = 1.2f;
+    int camera_model = 0;                  // 0 pinhole (upstream), 1 orthographic (telecentric lenses)
+    float ortho_ref_depth = 0.0f;          // <=0: per camera, the middle of its depth range; >0: this depth for all
     float range_pad = 0.0f;                // world units added to both ends of the scaled range
     bool all_pairs = false;                // true: every other image is a source view, pair.txt only orders them
     bool skip_self = false;                // true: a pair.txt entry naming the reference itself is ignored

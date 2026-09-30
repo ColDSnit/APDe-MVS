@@ -34,6 +34,8 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 
 | Option | Type | Default | Range / choices | Unit | Stage | Description |
 |---|---|---|---|---|---|---|
+| `camera.model` | enum | pinhole | pinhole, orthographic |  | patchmatch | Projection model of all cameras: pinhole, or orthographic for telecentric lenses written as long-focal-length pinhole equivalents (magnification = focal length / reference depth) |
+| `camera.ortho_ref_depth` | float | 0 | 0 .. 1e+09 | world | patchmatch | Orthographic reference depth at which the pinhole-equivalent focal length is exact (0: per camera, the middle of its depth search range) |
 | `fusion.depth_mode` | enum | relative | relative, absolute, pixel, off |  | fusion | Depth agreement test: relative (|dd|/d), absolute (world units), pixel (shift in the source image), off |
 | `fusion.depth_rel` | float | 0.01 | 0 .. 1e+09 | ratio | fusion | Depth tolerance in relative mode |
 | `fusion.depth_abs` | float | 0.1 | 0 .. 1e+09 | world | fusion | Depth tolerance in absolute mode, in the units of the camera translations |

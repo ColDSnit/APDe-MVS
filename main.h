@@ -62,6 +62,15 @@ struct Camera {
     float depth_max;
     float interval;
     float depth_num;
+    // Projection model. 0 = pinhole (upstream). 1 = orthographic (telecentric lens): the image position no
+    // longer depends on depth; K keeps its pinhole-equivalent values and the magnification is K / ref_depth.
+    int model = 0;
+    float ref_depth = 1.0f;  // depth at which the pinhole-equivalent K and the orthographic camera agree
+};
+
+enum CameraModel {
+    CAMERA_PINHOLE = 0,
+    CAMERA_ORTHOGRAPHIC = 1
 };
 
 struct PointList {

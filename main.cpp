@@ -360,6 +360,8 @@ int main(int argc, char **argv) {
         std::ofstream effective_file((output_folder / path(effective_name)).string().c_str());
         effective_file << effective;
     }
+    // the projection model must be known before the first camera file is read
+    SetCameraModel(pipeline);
     // generate problems
     std::vector<Problem> problems;
     GenerateSampleList(dense_folder, problems, pipeline);

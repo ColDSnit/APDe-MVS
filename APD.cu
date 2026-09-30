@@ -187,22 +187,29 @@ __device__ void TransformPDFToCDF(float* probs, const int num_probs)
 	}
 }
 
+// Orthographic (telecentric) cameras: the lateral position of a pixel's ray does not depend on depth, so the
+// back-projection scale is the fixed reference depth instead of the depth itself.
 __device__ void Get3DPoint(const Camera& camera, const int2 p, const float depth, float* X)
 {
-	X[0] = depth * (p.x - camera.K[2]) / camera.K[0];
-	X[1] = depth * (p.y - camera.K[5]) / camera.K[4];
+	const float scale = (camera.model == CAMERA_ORTHOGRAPHIC ? camera.ref_depth : depth);
+	X[0] = scale * (p.x - camera.K[2]) / camera.K[0];
+	X[1] = scale * (p.y - camera.K[5]) / camera.K[4];
 	X[2] = depth;
 }
 
 __device__ void Get3DPoint(const Camera& camera, const short2 p, const float depth, float* X)
 {
-	X[0] = depth * (p.x - camera.K[2]) / camera.K[0];
-	X[1] = depth * (p.y - camera.K[5]) / camera.K[4];
+	const float scale = (camera.model == CAMERA_ORTHOGRAPHIC ? camera.ref_depth : depth);
+	X[0] = scale * (p.x - camera.K[2]) / camera.K[0];
+	X[1] = scale * (p.y - camera.K[5]) / camera.K[4];
 	X[2] = depth;
 }
 
 __device__ float4 GetViewDirection(const Camera& camera, const int2 p, const float depth)
 {
+	if (camera.model == CAMERA_ORTHOGRAPHIC) {
+		return make_float4(0.0f, 0.0f, 1.0f, 0.0f);  // all rays are parallel to the optical axis
+	}
 	float X[3];
 	Get3DPoint(camera, p, depth, X);
 	float norm = sqrt(X[0] * X[0] + X[1] * X[1] + X[2] * X[2]);
@@ -236,6 +243,12 @@ __device__  float RangeGauss(float x, float sigma, float mu = 0.0)
 
 __device__ float ComputeDepthfromPlaneHypothesis(const Camera& camera, const float4 plane_hypothesis, const int2 p)
 {
+	if (camera.model == CAMERA_ORTHOGRAPHIC) {
+		// plane n.X + d = 0 with X = (a, b, z): a and b are fixed by the pixel, solve for z
+		const float a = camera.ref_depth * (p.x - camera.K[2]) / camera.K[0];
+		const float b = camera.ref_depth * (p.y - camera.K[5]) / camera.K[4];
+		return -(plane_hypothesis.w + plane_hypothesis.x * a + plane_hypothesis.y * b) / plane_hypothesis.z;
+	}
 	return -plane_hypothesis.w * camera.K[0] / ((p.x - camera.K[2]) * plane_hypothesis.x + (camera.K[0] / camera.K[4]) * (p.y - camera.K[5]) * plane_hypothesis.y + camera.K[0] * plane_hypothesis.z);
 }
 
@@ -360,6 +373,32 @@ __device__ void ComputeHomography(const Camera& ref_camera, const Camera& src_ca
 	t_relative[0] = src_camera.R[0] * C_relative[0] + src_camera.R[1] * C_relative[1] + src_camera.R[2] * C_relative[2];
 	t_relative[1] = src_camera.R[3] * C_relative[0] + src_camera.R[4] * C_relative[1] + src_camera.R[5] * C_relative[2];
 	t_relative[2] = src_camera.R[6] * C_relative[0] + src_camera.R[7] * C_relative[1] + src_camera.R[8] * C_relative[2];
+
+	if (ref_camera.model == CAMERA_ORTHOGRAPHIC) {
+		// Between two orthographic cameras a plane induces an affine map. A reference pixel (px, py) has
+		// camera coordinates a = ax*px + bx, b = ay*py + by and, on the plane, z = z0 + zx*px + zy*py.
+		const float ax = ref_camera.ref_depth / ref_camera.K[0];
+		const float ay = ref_camera.ref_depth / ref_camera.K[4];
+		const float bx = -ax * ref_camera.K[2];
+		const float by = -ay * ref_camera.K[5];
+		const float inv_nz = 1.0f / plane_hypothesis.z;
+		const float z0 = -(plane_hypothesis.w + plane_hypothesis.x * bx + plane_hypothesis.y * by) * inv_nz;
+		const float zx = -plane_hypothesis.x * ax * inv_nz;
+		const float zy = -plane_hypothesis.y * ay * inv_nz;
+		// source magnification in pixels per world unit
+		const float mx = src_camera.K[0] / src_camera.ref_depth;
+		const float my = src_camera.K[4] / src_camera.ref_depth;
+		H[0] = mx * (R_relative[0] * ax + R_relative[2] * zx);
+		H[1] = mx * (R_relative[1] * ay + R_relative[2] * zy);
+		H[2] = mx * (R_relative[0] * bx + R_relative[1] * by + R_relative[2] * z0 + t_relative[0]) + src_camera.K[2];
+		H[3] = my * (R_relative[3] * ax + R_relative[5] * zx);
+		H[4] = my * (R_relative[4] * ay + R_relative[5] * zy);
+		H[5] = my * (R_relative[3] * bx + R_relative[4] * by + R_relative[5] * z0 + t_relative[1]) + src_camera.K[5];
+		H[6] = 0.0f;
+		H[7] = 0.0f;
+		H[8] = 1.0f;
+		return;
+	}
 
 	H[0] = R_relative[0] - t_relative[0] * plane_hypothesis.x / plane_hypothesis.w;
 	H[1] = R_relative[1] - t_relative[0] * plane_hypothesis.y / plane_hypothesis.w;
@@ -832,9 +871,10 @@ __device__ float3 Get3DPointonWorld_cu(const float x, const float y, const float
 {
 	float3 pointX;
 	float3 tmpX;
-	// Reprojection
-	pointX.x = depth * (x - camera.K[2]) / camera.K[0];
-	pointX.y = depth * (y - camera.K[5]) / camera.K[4];
+	// Reprojection (orthographic: the lateral position does not depend on depth)
+	const float scale = (camera.model == CAMERA_ORTHOGRAPHIC ? camera.ref_depth : depth);
+	pointX.x = scale * (x - camera.K[2]) / camera.K[0];
+	pointX.y = scale * (y - camera.K[5]) / camera.K[4];
 	pointX.z = depth;
 
 	// Rotation
@@ -857,6 +897,12 @@ __device__ void ProjectonCamera_cu(const float3 PointX, const Camera& camera, fl
 	tmp.y = camera.R[3] * PointX.x + camera.R[4] * PointX.y + camera.R[5] * PointX.z + camera.t[1];
 	tmp.z = camera.R[6] * PointX.x + camera.R[7] * PointX.y + camera.R[8] * PointX.z + camera.t[2];
 
+	if (camera.model == CAMERA_ORTHOGRAPHIC) {
+		depth = tmp.z;
+		point.x = camera.K[0] * tmp.x / camera.ref_depth + camera.K[2];
+		point.y = camera.K[4] * tmp.y / camera.ref_depth + camera.K[5];
+		return;
+	}
 	depth = camera.K[6] * tmp.x + camera.K[7] * tmp.y + camera.K[8] * tmp.z;
 	point.x = (camera.K[0] * tmp.x + camera.K[1] * tmp.y + camera.K[2] * tmp.z) / depth;
 	point.y = (camera.K[3] * tmp.x + camera.K[4] * tmp.y + camera.K[5] * tmp.z) / depth;

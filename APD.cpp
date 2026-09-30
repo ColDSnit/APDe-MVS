@@ -82,6 +82,13 @@ bool WriteBinMat(const path &mat_path, const cv::Mat &mat, bool flush) {
     return true;
 }
 
+// Projection model applied to every camera that is read (pinhole unless main() says otherwise).
+static PipelineParams camera_model_params;
+
+void SetCameraModel(const PipelineParams &pipeline) {
+    camera_model_params = pipeline;
+}
+
 bool ReadCamera(const path &cam_path, Camera &cam) {
     if (memory_cache != nullptr) {
         auto &cam_cache = memory_cache->cam_cache;
@@ -123,6 +130,15 @@ bool ReadCamera(const path &cam_path, Camera &cam) {
         cam.depth_max = cam.interval * cam.depth_num + cam.depth_min;
     }
     in.close();
+    cam.model = camera_model_params.camera_model;
+    if (cam.model == CAMERA_ORTHOGRAPHIC) {
+        // The pinhole-equivalent focal length is exact at one depth only; by default that is taken to be the
+        // middle of this camera's depth search range, i.e. where the object is.
+        cam.ref_depth = camera_model_params.ortho_ref_depth > 0.0f
+                        ? camera_model_params.ortho_ref_depth
+                        : 0.5f * (cam.depth_min * camera_model_params.range_scale_min +
+                                  cam.depth_max * camera_model_params.range_scale_max);
+    }
     if (memory_cache != nullptr) {
         auto &cam_cache = memory_cache->cam_cache;
         if (cam_cache.find(cam_path.string()) == cam_cache.end()) {
@@ -871,9 +887,10 @@ void RescaleImageAndCamera(cv::Mat &src, cv::Mat &dst, cv::Mat &depth, Camera &c
 float3 Get3DPointonWorld(const int x, const int y, const float depth, const Camera camera) {
     float3 pointX;
     float3 tmpX;
-    // Reprojection
-    pointX.x = depth * (x - camera.K[2]) / camera.K[0];
-    pointX.y = depth * (y - camera.K[5]) / camera.K[4];
+    // Reprojection (orthographic: the lateral position does not depend on depth)
+    const float scale = (camera.model == CAMERA_ORTHOGRAPHIC ? camera.ref_depth : depth);
+    pointX.x = scale * (x - camera.K[2]) / camera.K[0];
+    pointX.y = scale * (y - camera.K[5]) / camera.K[4];
     pointX.z = depth;
 
     // Rotation
@@ -899,6 +916,12 @@ void ProjectCamera(const float3 PointX, const Camera &camera, float2 &point, flo
     tmp.y = camera.R[3] * PointX.x + camera.R[4] * PointX.y + camera.R[5] * PointX.z + camera.t[1];
     tmp.z = camera.R[6] * PointX.x + camera.R[7] * PointX.y + camera.R[8] * PointX.z + camera.t[2];
 
+    if (camera.model == CAMERA_ORTHOGRAPHIC) {
+        depth = tmp.z;
+        point.x = camera.K[0] * tmp.x / camera.ref_depth + camera.K[2];
+        point.y = camera.K[4] * tmp.y / camera.ref_depth + camera.K[5];
+        return;
+    }
     depth = camera.K[6] * tmp.x + camera.K[7] * tmp.y + camera.K[8] * tmp.z;
     point.x = (camera.K[0] * tmp.x + camera.K[1] * tmp.y + camera.K[2] * tmp.z) / depth;
     point.y = (camera.K[3] * tmp.x + camera.K[4] * tmp.y + camera.K[5] * tmp.z) / depth;

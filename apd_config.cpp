@@ -124,6 +124,19 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
     weak_depth_modes.push_back("relative");
     weak_depth_modes.push_back("absolute");
 
+    std::vector<std::string> camera_models;                   // index must equal CameraModel
+    camera_models.push_back("pinhole");
+    camera_models.push_back("orthographic");
+
+    // ---------------------------------------------------------------- camera model
+    Add("camera.model", OPTION_ENUM, &p.camera_model, false, 0, 0, PM, "",
+        "Projection model of all cameras: pinhole, or orthographic for telecentric lenses written as "
+        "long-focal-length pinhole equivalents (magnification = focal length / reference depth)",
+        camera_models);
+    Add("camera.ortho_ref_depth", OPTION_FLOAT, &p.ortho_ref_depth, true, 0, BIG, PM, "world",
+        "Orthographic reference depth at which the pinhole-equivalent focal length is exact "
+        "(0: per camera, the middle of its depth search range)");
+
     // ---------------------------------------------------------------- fusion
     Add("fusion.depth_mode", OPTION_ENUM, &f.depth_mode, false, 0, 0, FU, "",
         "Depth agreement test: relative (|dd|/d), absolute (world units), pixel (shift in the source image), off",
