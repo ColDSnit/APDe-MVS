@@ -226,6 +226,12 @@ int ComputeRoundNum(const std::vector<Problem> &problems, const PipelineParams &
         max_size /= 2;
         round_num++;
     }
+    // optional extra coarse scales on top of the automatic count; stop before the shorter side drops below 32 px
+    int min_size = MIN(image.cols, image.rows) >> (round_num - 1);
+    for (int extra = 0; extra < pipeline.extra_rounds && min_size / 2 >= 32; ++extra) {
+        min_size /= 2;
+        round_num++;
+    }
     return round_num;
 }
 

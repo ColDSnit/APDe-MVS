@@ -72,6 +72,7 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 | `views.max_angle_deg` | float | -1 | -1 .. 180 | deg | patchmatch | Drop source views whose optical axis is further than this from the reference axis (<0: off) |
 | `pipeline.round_max_size` | int | 800 | 16 .. 1e+06 | px | patchmatch | The image is halved until its longer side is at most this; sets the number of scales |
 | `pipeline.rounds` | int | -1 | -1 .. 16 |  | patchmatch | Force the number of scales (<=0: derive from round_max_size) |
+| `pipeline.extra_rounds` | int | 0 | 0 .. 8 |  | patchmatch | Scales added to the automatic count (each one starts at half the size of the previous coarsest; ignored when rounds > 0; never shrinks the image below 32 px) |
 | `pipeline.geom_iterations` | int | 3 | 0 .. 64 |  | patchmatch | Geometric-consistency passes per scale |
 | `pipeline.max_iterations` | int | 3 | 1 .. 64 |  | patchmatch | Checkerboard propagation iterations per pass |
 | `pipeline.init_weak_peak_radius` | int | 6 | 0 .. 30 | steps | patchmatch | Cost-curve peak tolerance of the first pass of each scale |

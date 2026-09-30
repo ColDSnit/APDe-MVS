@@ -220,6 +220,9 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
         "The image is halved until its longer side is at most this; sets the number of scales");
     Add("pipeline.rounds", OPTION_INT, &p.rounds, true, -1, 16, PM, "",
         "Force the number of scales (<=0: derive from round_max_size)");
+    Add("pipeline.extra_rounds", OPTION_INT, &p.extra_rounds, true, 0, 8, PM, "",
+        "Scales added to the automatic count (each one starts at half the size of the previous coarsest; "
+        "ignored when rounds > 0; never shrinks the image below 32 px)");
     Add("pipeline.geom_iterations", OPTION_INT, &p.geom_iterations, true, 0, 64, PM, "",
         "Geometric-consistency passes per scale");
     Add("pipeline.max_iterations", OPTION_INT, &p.max_iterations, true, 1, 64, PM, "",

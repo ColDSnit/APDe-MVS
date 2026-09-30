@@ -53,6 +53,7 @@ struct WeakFilterParams {
 struct PipelineParams {
     int round_max_size = 800;              // halve the image until its longer side is <= this
     int rounds = -1;                       // >0 forces the number of scales
+    int extra_rounds = 0;                  // added to the automatic number of scales (ignored when rounds > 0)
     int geom_iterations = 3;               // geometric-consistency passes per scale
     int max_iterations = 3;                // checkerboard propagation iterations per pass
     int init_weak_peak_radius = 6;         // weak_peak_radius of the first pass of each scale
