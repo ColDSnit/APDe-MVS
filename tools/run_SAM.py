@@ -84,9 +84,15 @@ def object_prompt(image_rgb: np.ndarray, pad_fraction: float = 0.03):
     The legacy prompt (a box over the central 80% of the frame) makes SAM pick the dark background ring when the
     object fills most of the image. Measured on the mouse1 heart (16 views, IoU with the silhouette): centre box 0.56
     mean (0.04-0.07 on the back view), this box + point 0.91.
+    The silhouette is thresholded on log(1 + I): a linear Otsu threshold falls between the bright ventricles and the
+    dim atria / base, so its box cut SAM off from the base. Measured on mouse1 frame 71 (16 views): with the log box
+    SAM3 keeps the base and agrees with the log silhouette at IoU 0.96-0.98 (top third 0.95-0.98); with the linear
+    box the top-third IoU against the log silhouette was 0.31-0.95.
     """
     grey = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-    _, sil = cv2.threshold(cv2.GaussianBlur(grey, (0, 0), 2), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    blurred = cv2.GaussianBlur(grey, (0, 0), 2)
+    log_grey = np.clip(np.rint(np.log1p(blurred.astype(np.float64)) * (255.0 / np.log(256.0))), 0, 255).astype(np.uint8)
+    _, sil = cv2.threshold(log_grey, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)  # Otsu in log intensity.
     count, labels, stats, _ = cv2.connectedComponentsWithStats(sil)
     if count < 2:
         return None
