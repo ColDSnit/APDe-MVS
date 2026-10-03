@@ -1195,6 +1195,54 @@ void RunFusion(
         WeakVisFilter(problems, cameras, depths, weaks, confidences, dense_folder, skip_weaks, wf);
     }
 
+    // Silhouette-edge trim (fusion.silhouette_trim_px): pixels within the band on either side of each view's own
+    // silhouette edge are marked as used, so they are neither references nor sources.
+    if (fp.silhouette_trim_px > 0) {
+        for (int i = 0; i < num_images; ++i) {
+            const int idx = imageIdToindexMap[problems[i].ref_image_id];
+            path sa_path = dense_folder / path("sa_masks") / path(ToFormatIndex(problems[i].ref_image_id) + ".bin");
+            cv::Mat sa;
+            if (!exists(sa_path) || !ReadBinMat(sa_path, sa)) {
+                std::cout << "silhouette_trim_px: no silhouette for image " << i << " (" << sa_path << "), not trimmed"
+                          << std::endl;
+                continue;
+            }
+            cv::Mat inside;
+            cv::resize(sa != 0, inside, cv::Size(depths[idx].cols, depths[idx].rows), 0, 0, cv::INTER_NEAREST);
+            cv::Mat outside = (inside == 0);
+            cv::Mat d_in, d_out;
+            cv::distanceTransform(inside, d_in, cv::DIST_L2, 5);     // inside pixels: distance to the background
+            cv::distanceTransform(outside, d_out, cv::DIST_L2, 5);   // outside pixels: distance to the object
+            int trimmed = 0;
+            for (int r = 0; r < inside.rows; ++r) {
+                for (int c = 0; c < inside.cols; ++c) {
+                    const float d = inside.at<uchar>(r, c) ? d_in.at<float>(r, c) : d_out.at<float>(r, c);
+                    if (d <= (float) fp.silhouette_trim_px) {
+                        masks[idx].at<uchar>(r, c) = 1;
+                        ++trimmed;
+                    }
+                }
+            }
+            std::cout << "silhouette_trim_px " << fp.silhouette_trim_px << ": image " << i << " trimmed " << trimmed
+                      << " pixels" << std::endl;
+        }
+    }
+    const bool use_incident_max = fp.incident_max_deg >= 0.0f;
+    const bool use_incident_prior = fp.incident_sigma_deg > 0.0f;
+    const float incident_cos_min = use_incident_max ? cosf(fp.incident_max_deg * (float) M_PI / 180.0f) : -2.0f;
+    const float incident_two_sigma2 = use_incident_prior ?
+        2.0f * powf(fp.incident_sigma_deg * (float) M_PI / 180.0f, 2.0f) : 1.0f;
+    // cosine of the angle between a pixel normal (world frame) and the direction from its 3D point to its camera
+    auto incident_cos = [](const cv::Vec3f &n, const float3 &X, const Camera &cam) {
+        cv::Vec3f v(cam.c[0] - X.x, cam.c[1] - X.y, cam.c[2] - X.z);
+        const float nn = (float) cv::norm(n), vn = (float) cv::norm(v);
+        return (nn > 0.0f && vn > 0.0f) ? (float) n.dot(v) / (nn * vn) : 1.0f;
+    };
+    auto incident_prior = [&](float cosk) {
+        const float k = acosf(std::max(-1.0f, std::min(1.0f, cosk)));
+        return expf(-k * k / incident_two_sigma2);
+    };
+
     std::vector<PointList> PointCloud;
     PointCloud.clear();
     const bool use_angle_window = (fp.view_min_angle_deg >= 0.0f || fp.view_max_angle_deg >= 0.0f);
@@ -1230,6 +1278,14 @@ void RunFusion(
                 const cv::Vec3f ref_normal = normals[ref_index].at<cv::Vec3f>(r, c);
                 float3 PointX = Get3DPointonWorld(c, r, ref_depth, cameras[ref_index]);
                 float3 consistent_Point = PointX;
+                float ref_prior = 1.0f;
+                if (use_incident_max || use_incident_prior) {
+                    const float ref_cos = incident_cos(ref_normal, PointX, cameras[ref_index]);
+                    if (use_incident_max && ref_cos < incident_cos_min)
+                        continue;                            // grazing reference pixel
+                    if (use_incident_prior)
+                        ref_prior = incident_prior(ref_cos);
+                }
 
                 int num_consistent = 0;
                 float dynamic_consistency = 0.0f;
@@ -1257,6 +1313,14 @@ void RunFusion(
                         ProjectCamera(tmp_X, cameras[ref_index], tmp_pt, proj_depth);
                         float reproj_error = sqrt(pow(c - tmp_pt.x, 2) + pow(r - tmp_pt.y, 2));
                         float relative_depth_diff = fabs(proj_depth - ref_depth) / ref_depth;
+                        float src_prior = 1.0f;
+                        if (use_incident_max || use_incident_prior) {
+                            const float src_cos = incident_cos(src_normal, tmp_X, cameras[src_index]);
+                            if (use_incident_max && src_cos < incident_cos_min)
+                                continue;                    // grazing source pixel
+                            if (use_incident_prior)
+                                src_prior = incident_prior(src_cos);
+                        }
                         // normals.bin holds world-frame normals (GetDepthandNormal rotates them), so this
                         // comparison is valid for any angle between the two cameras
                         float angle = fp.normal_test ? GetAngle(ref_normal, src_normal) : 0.0f;
@@ -1289,7 +1353,7 @@ void RunFusion(
                             used_list[j].y = src_r;
                             float tmp_index = fp.score_w_reproj * reproj_error + depth_score +
                                               angle * fp.score_w_normal;
-                            dynamic_consistency += exp(-tmp_index);
+                            dynamic_consistency += exp(-tmp_index) * src_prior;
                             num_consistent++;
                             if (fp.average_position) {
                                 consistent_Point.x += tmp_X.x;
@@ -1301,7 +1365,7 @@ void RunFusion(
                 }
                 float factor = (weaks[ref_index].at<uchar>(r, c) == WEAK ? fp.score_thresh_weak
                                                                          : fp.score_thresh_strong);
-                if (num_consistent >= fp.min_consistent && (dynamic_consistency > factor * num_consistent)) {
+                if (num_consistent >= fp.min_consistent && (ref_prior * dynamic_consistency > factor * num_consistent)) {
                     if (fp.average_position) {
                         consistent_Point.x /= (num_consistent + 1);
                         consistent_Point.y /= (num_consistent + 1);

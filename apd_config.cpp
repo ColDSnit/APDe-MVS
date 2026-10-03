@@ -175,6 +175,15 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
         "Skip source views whose optical axis is closer than this to the reference axis (<0: off)");
     Add("fusion.view_max_angle_deg", OPTION_FLOAT, &f.view_max_angle_deg, true, -1, 180, FU, "deg",
         "Skip source views whose optical axis is further than this from the reference axis (<0: off)");
+    Add("fusion.incident_max_deg", OPTION_FLOAT, &f.incident_max_deg, true, -1, 180, FU, "deg",
+        "A pixel takes part in fusion (as reference or source) only if the angle between its normal and the direction "
+        "to its own camera is at most this (<0: off)");
+    Add("fusion.incident_sigma_deg", OPTION_FLOAT, &f.incident_sigma_deg, true, -1, 180, FU, "deg",
+        "Soft incident-angle prior exp(-k^2/2s^2) on every source term and on the reference score (<0: off; "
+        "Schoenberger et al. 2016 use 45)");
+    Add("fusion.silhouette_trim_px", OPTION_INT, &f.silhouette_trim_px, true, 0, 100000, FU, "px",
+        "Pixels within this many depth-map pixels of the view's silhouette edge (scene/sa_masks) take no part in "
+        "fusion (0: off)");
 
     // ---------------------------------------------------------------- weak visibility filter
     Add("weakfilter.max_view_angle_deg", OPTION_FLOAT, &w.max_view_angle_deg, true, 0, 180, FU, "deg",
