@@ -912,6 +912,12 @@ void APD::LoadDepthPrior(int full_width, int full_height) {
                   << " (expected CV_32FC1 depth or CV_32FC2 lo/hi); view range used everywhere" << std::endl;
         return;
     }
+    const uintmax_t expected_bytes = 16 + (uintmax_t) prior.total() * prior.elemSize();
+    if (file_size(prior_path) < expected_bytes) {              // ReadBinMat does not notice a truncated file
+        std::cout << "WARNING Depth prior " << prior_path << " is truncated (" << file_size(prior_path) << " of "
+                  << expected_bytes << " bytes); view range used everywhere" << std::endl;
+        return;
+    }
     if (prior.cols != full_width || prior.rows != full_height) {
         std::cout << "WARNING Depth prior " << prior_path << " is " << prior.cols << "x" << prior.rows
                   << ", the image is " << full_width << "x" << full_height << "; view range used everywhere" << std::endl;

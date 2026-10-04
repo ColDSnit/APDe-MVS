@@ -304,7 +304,7 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
     // ---------------------------------------------------------------- per-pixel depth prior
     Add("prior.enable", OPTION_BOOL, &m.prior_enable, false, 0, 0, PM, "",
         "Read <dense>/depth_prior/<ref>.bin (BinMat at the image size; float z-depth or float2 lo/hi, 0 = none; "
-        "see Notes) and confine each pixel's random init, refinement, perturbation, propagation, weak/strong "
+        "see the depth-prior section of docs/RUNTIME_OPTIONS.md) and confine each pixel's random init, refinement, perturbation, propagation, weak/strong "
         "cost curve, final refinement and output filter to its band; pixels without a prior keep the view range. "
         "Prior depths are absolute (not scaled by depth.range_scale_* or padded by depth.range_pad)");
     Add("prior.band_near", OPTION_FLOAT, &m.prior_band_near, true, 0, BIG, PM, "world",

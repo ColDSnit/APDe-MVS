@@ -44,8 +44,8 @@ With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each r
   image, before APD's own scaling); any other size disables the prior for that view, with a warning. Pixel
   (x, y) is the ray through image position (x, y) of the cam-file K (pixel centres at integer coordinates).
 - 0, a non-finite value, a non-positive `lo` or `hi <= lo` mean "no prior here": that pixel keeps the view's
-  depth range. A file with no valid pixel, a missing file or an unreadable file disables the prior for the
-  view with a warning.
+  depth range. A file with no valid pixel, a missing, unreadable or truncated file disables the prior for
+  the view with a warning.
 - At each scale the map is pooled to the working size: a working pixel takes the minimum `lo` and maximum
   `hi` of the full-size pixels whose centres lie in its footprint (at full size, its own band).
 - Inside the band APD draws its random initial depths, refinement candidates and perturbations, accepts
@@ -56,7 +56,10 @@ With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each r
   round lies outside the band (or is 0), the pixel is re-seeded randomly inside its band, and with a prior
   loaded a pixel without a band is re-seeded inside the view range in the same way.
 - Units: the `prior.band_*` defaults (0.0005) are 0.5 mm only when the world unit is the metre.
-- With a prior loaded, the depth perturbation is always clipped to the pixel's band (`pm.perturbation_clip`).
+- With a prior loaded, the depth perturbation is always clipped (`pm.perturbation_clip`): to the pixel's band,
+  or to the view range for a pixel without one.
+- `fusion.*` options apply to the default fusion (`RunFusion`); the Tanks and Temples fusion variants
+  (`--dataset TaT_a`/`TaT_i`) do not read them.
 
 ## Reference
 
@@ -132,7 +135,7 @@ With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each r
 | `pm.depth_perturbation_mode` | enum | relative | relative, range, absolute |  | patchmatch | Depth perturbation window: relative = +-depth_perturbation * depth (upstream; for a long-focal pinhole approximation of a telecentric lens the depth is metres, so the window is far wider than the object), range = +-depth_perturbation * width of the pixel's search range, absolute = +-depth_perturbation_abs; range and absolute are clipped to the search range |
 | `pm.depth_perturbation_abs` | float | 0 | 0 .. 1e+09 | world | patchmatch | Half-width of the absolute depth perturbation (depth_perturbation_mode = absolute; must then be > 0) |
 | `pm.perturbation_clip` | bool | false |  |  | patchmatch | Draw the perturbed depth inside the pixel's search range (upstream's retry loop never retries); always on for the range/absolute modes and with a depth prior |
-| `prior.enable` | bool | false |  |  | patchmatch | Read <dense>/depth_prior/<ref>.bin (BinMat at the image size; float z-depth or float2 lo/hi, 0 = none; see Notes) and confine each pixel's random init, refinement, perturbation, propagation, weak/strong cost curve, final refinement and output filter to its band; pixels without a prior keep the view range. Prior depths are absolute (not scaled by depth.range_scale_* or padded by depth.range_pad) |
+| `prior.enable` | bool | false |  |  | patchmatch | Read <dense>/depth_prior/<ref>.bin (BinMat at the image size; float z-depth or float2 lo/hi, 0 = none; see the depth-prior section of docs/RUNTIME_OPTIONS.md) and confine each pixel's random init, refinement, perturbation, propagation, weak/strong cost curve, final refinement and output filter to its band; pixels without a prior keep the view range. Prior depths are absolute (not scaled by depth.range_scale_* or padded by depth.range_pad) |
 | `prior.band_near` | float | 0.0005 | 0 .. 1e+09 | world | patchmatch | Band towards the camera around a 1-channel prior depth: lo = prior - this |
 | `prior.band_far` | float | 0.0005 | 0 .. 1e+09 | world | patchmatch | Band away from the camera around a 1-channel prior depth: hi = prior + this |
 | `viewsel.prior_selected` | float | 0.9 | 0 .. 1 |  | patchmatch | Prior of a view that a neighbouring pixel selected |
