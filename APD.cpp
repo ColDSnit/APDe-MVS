@@ -893,6 +893,45 @@ bool APD::DepthInBounds(int r, int c, float depth) {
     return !(depth < lo || depth > hi);                        // upstream's test: a NaN depth is not rejected here
 }
 
+// Reads a depth-prior BinMat without the memory cache (a cached input would be written back to disk by --flush):
+// checks the header, the type (CV_32FC1 / CV_32FC2) and the file length before and after reading the data.
+static bool ReadDepthPriorFile(const path &prior_path, cv::Mat &prior, std::string &problem_text) {
+    std::ifstream in(prior_path.string(), std::ios_base::binary);
+    if (!in.is_open()) {
+        problem_text = "cannot be opened";
+        return false;
+    }
+    int header[4] = {0, 0, 0, 0};                              // version, rows, cols, OpenCV type
+    in.read(reinterpret_cast<char *>(header), sizeof(header));
+    if (in.gcount() != (std::streamsize) sizeof(header) || header[0] != 1) {
+        problem_text = "has no valid BinMat header";
+        return false;
+    }
+    const int rows = header[1], cols = header[2], type = header[3];
+    if (type != CV_32FC1 && type != CV_32FC2) {
+        problem_text = "has OpenCV type " + std::to_string(type) + " (expected CV_32FC1 depth or CV_32FC2 lo/hi)";
+        return false;
+    }
+    if (rows <= 0 || cols <= 0) {
+        problem_text = "has size " + std::to_string(cols) + "x" + std::to_string(rows);
+        return false;
+    }
+    const uintmax_t data_bytes = (uintmax_t) rows * (uintmax_t) cols * (uintmax_t) CV_ELEM_SIZE(type);
+    if (file_size(prior_path) != sizeof(header) + data_bytes) {
+        problem_text = "has " + std::to_string(file_size(prior_path)) + " bytes, the header needs " +
+                       std::to_string(sizeof(header) + data_bytes);
+        return false;
+    }
+    prior = cv::Mat(rows, cols, type);
+    in.read(reinterpret_cast<char *>(prior.data), (std::streamsize) data_bytes);
+    if (in.gcount() != (std::streamsize) data_bytes) {
+        problem_text = "could not be read completely";
+        prior.release();
+        return false;
+    }
+    return true;
+}
+
 void APD::LoadDepthPrior(int full_width, int full_height) {
     // The prior is stored once at the reference image's own size (before APD's scaling): CV_32FC1 = prior depth
     // (band from the prior.band_near / prior.band_far options) or CV_32FC2 = (lo, hi), camera-frame z in world units.
@@ -903,19 +942,10 @@ void APD::LoadDepthPrior(int full_width, int full_height) {
         return;
     }
     cv::Mat prior;
-    if (!ReadBinMat(prior_path, prior) || prior.empty()) {
-        std::cout << "WARNING Depth prior unreadable (view range used everywhere): " << prior_path << std::endl;
-        return;
-    }
-    if (prior.type() != CV_32FC1 && prior.type() != CV_32FC2) {
-        std::cout << "WARNING Depth prior " << prior_path << " has OpenCV type " << prior.type()
-                  << " (expected CV_32FC1 depth or CV_32FC2 lo/hi); view range used everywhere" << std::endl;
-        return;
-    }
-    const uintmax_t expected_bytes = 16 + (uintmax_t) prior.total() * prior.elemSize();
-    if (file_size(prior_path) < expected_bytes) {              // ReadBinMat does not notice a truncated file
-        std::cout << "WARNING Depth prior " << prior_path << " is truncated (" << file_size(prior_path) << " of "
-                  << expected_bytes << " bytes); view range used everywhere" << std::endl;
+    std::string problem_text;
+    if (!ReadDepthPriorFile(prior_path, prior, problem_text)) {
+        std::cout << "WARNING Depth prior " << prior_path << ": " << problem_text << "; view range used everywhere"
+                  << std::endl;
         return;
     }
     if (prior.cols != full_width || prior.rows != full_height) {

@@ -44,7 +44,8 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 
 ## Per-pixel depth prior (`prior.*`)
 
-With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each reference view:
+With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each reference view (`<ref>` is the
+view index with 8 digits, as for the images and cam files, e.g. `00000003.bin`):
 
 - Format: APD BinMat, i.e. four int32 values (version 1, rows, cols, OpenCV type) followed by the row-major
   pixel data. Type `CV_32FC1` holds a prior depth, turned into the band
@@ -56,8 +57,10 @@ With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each r
   image, before APD's own scaling); any other size disables the prior for that view, with a warning. Pixel
   (x, y) is the ray through image position (x, y) of the cam-file K (pixel centres at integer coordinates).
 - 0, a non-finite value, a non-positive `lo` or `hi <= lo` mean "no prior here": that pixel keeps the view's
-  depth range. A file with no valid pixel, a missing, unreadable or truncated file disables the prior for
-  the view with a warning.
+  depth range. A file with no valid pixel, a missing or unreadable file, or one whose length does not match
+  its header disables the prior for the view with a warning. The prior is read past APD's memory cache, so
+  `--flush` never writes it back.
+- With a 1-channel map, `prior.band_near + prior.band_far` must be > 0, otherwise no pixel has a band.
 - At each scale the map is pooled to the working size: a working pixel takes the minimum `lo` and maximum
   `hi` of the full-size pixels whose centres lie in its footprint (at full size, its own band).
 - Inside the band APD draws its random initial depths, refinement candidates and perturbations, accepts
@@ -66,7 +69,8 @@ With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each r
   depths inside the band, so more pixels are classified STRONG; the median filter of STRONG pixels is not
   confined to the band, so a filtered depth that leaves it becomes 0; when the inherited depth of a later
   round lies outside the band (or is 0), the pixel is re-seeded randomly inside its band, and with a prior
-  loaded a pixel without a band is re-seeded inside the view range in the same way.
+  loaded a pixel without a band is re-seeded inside the view range in the same way. The weak-pixel anchor
+  search and the `depth_*.jpg` debug images still use the view range.
 - Units: the `prior.band_*` defaults (0.0005) are 0.5 mm only when the world unit is the metre.
 - With a prior loaded, the depth perturbation is always clipped (`pm.perturbation_clip`): to the pixel's band,
   or to the view range for a pixel without one.
