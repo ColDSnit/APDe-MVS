@@ -57,6 +57,11 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 | `fusion.incident_max_deg` | float | -1 | -1 .. 180 | deg | fusion | A pixel takes part in fusion (as reference or source) only if the angle between its normal and the direction to its own camera is at most this (<0: off) |
 | `fusion.incident_sigma_deg` | float | -1 | -1 .. 180 | deg | fusion | Soft incident-angle prior exp(-k^2/2s^2) on every source term and on the reference score (<0: off; Schoenberger et al. 2016 use 45) |
 | `fusion.silhouette_trim_px` | int | 0 | 0 .. 100000 | px | fusion | Pixels within this many depth-map pixels of the view's silhouette edge (scene/sa_masks) take no part in fusion (0: off) |
+| `fusion.occlusion_test` | bool | false |  |  | fusion | Behind-surface test: reject a point with at most occlusion_max_support agreeing sources when another view sees a surface more than occlusion_tol in front of it along its ray and that surface has at least occlusion_min_support agreeing sources (removes 2-view layers lying under a multi-view surface) |
+| `fusion.occlusion_max_support` | int | 1 | 0 .. 32 | views | fusion | Reference pixels with at most this many agreeing sources are tested (1 = two-view points) |
+| `fusion.occlusion_min_support` | int | 2 | 1 .. 32 | views | fusion | Agreeing sources an occluding pixel needs (2 = a surface seen consistently by at least three views) |
+| `fusion.occlusion_tol` | float | 0.0001 | 0 .. 1e+09 | world | fusion | Distance along the occluding view's ray by which its surface must lie in front of the point |
+| `fusion.occlusion_min_cos` | float | 0.2 | -1 .. 1 |  | fusion | A view takes part only if the point's normal and the occluding pixel's normal both face it with at least this cosine |
 | `weakfilter.max_view_angle_deg` | float | 80 | 0 .. 180 | deg | fusion | Source views separated by more than this angle at the point are ignored |
 | `weakfilter.depth_mode` | enum | relative | relative, absolute |  | fusion | Occlusion margin type: relative or absolute |
 | `weakfilter.depth_rel` | float | 0.01 | 0 .. 1e+09 | ratio | fusion | Occlusion margin relative to the source depth |

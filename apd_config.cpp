@@ -184,6 +184,19 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
     Add("fusion.silhouette_trim_px", OPTION_INT, &f.silhouette_trim_px, true, 0, 100000, FU, "px",
         "Pixels within this many depth-map pixels of the view's silhouette edge (scene/sa_masks) take no part in "
         "fusion (0: off)");
+    Add("fusion.occlusion_test", OPTION_BOOL, &f.occlusion_test, false, 0, 0, FU, "",
+        "Behind-surface test: reject a point with at most occlusion_max_support agreeing sources when another view "
+        "sees a surface more than occlusion_tol in front of it along its ray and that surface has at least "
+        "occlusion_min_support agreeing sources (removes 2-view layers lying under a multi-view surface)");
+    Add("fusion.occlusion_max_support", OPTION_INT, &f.occlusion_max_support, true, 0, MAX_IMAGES, FU, "views",
+        "Reference pixels with at most this many agreeing sources are tested (1 = two-view points)");
+    Add("fusion.occlusion_min_support", OPTION_INT, &f.occlusion_min_support, true, 1, MAX_IMAGES, FU, "views",
+        "Agreeing sources an occluding pixel needs (2 = a surface seen consistently by at least three views)");
+    Add("fusion.occlusion_tol", OPTION_FLOAT, &f.occlusion_tol, true, 0, BIG, FU, "world",
+        "Distance along the occluding view's ray by which its surface must lie in front of the point");
+    Add("fusion.occlusion_min_cos", OPTION_FLOAT, &f.occlusion_min_cos, true, -1, 1, FU, "",
+        "A view takes part only if the point's normal and the occluding pixel's normal both face it with at least "
+        "this cosine");
 
     // ---------------------------------------------------------------- weak visibility filter
     Add("weakfilter.max_view_angle_deg", OPTION_FLOAT, &w.max_view_angle_deg, true, 0, 180, FU, "deg",
