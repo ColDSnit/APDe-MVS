@@ -894,9 +894,11 @@ bool APD::DepthInBounds(int r, int c, float depth) {
 }
 
 // Reads a depth-prior BinMat without the memory cache (a cached input would be written back to disk by --flush):
-// checks the header, the type (CV_32FC1 / CV_32FC2) and the file length before and after reading the data.
-static bool ReadDepthPriorFile(const path &prior_path, cv::Mat &prior, std::string &problem_text) {
-    std::ifstream in(prior_path.string(), std::ios_base::binary);
+// checks the header, the type (CV_32FC1 / CV_32FC2), the size (must be expected_cols x expected_rows) and the file
+// length before reading the data, and the read itself.
+static bool ReadDepthPriorFile(const path &prior_path, int expected_cols, int expected_rows, cv::Mat &prior,
+                               std::string &problem_text) {
+    boost::filesystem::ifstream in(prior_path, std::ios_base::binary);      // wide path on Windows, as ReadBinMat
     if (!in.is_open()) {
         problem_text = "cannot be opened";
         return false;
@@ -912,14 +914,17 @@ static bool ReadDepthPriorFile(const path &prior_path, cv::Mat &prior, std::stri
         problem_text = "has OpenCV type " + std::to_string(type) + " (expected CV_32FC1 depth or CV_32FC2 lo/hi)";
         return false;
     }
-    if (rows <= 0 || cols <= 0) {
-        problem_text = "has size " + std::to_string(cols) + "x" + std::to_string(rows);
+    if (rows != expected_rows || cols != expected_cols) {      // also bounds the size arithmetic below
+        problem_text = "is " + std::to_string(cols) + "x" + std::to_string(rows) + ", the image is " +
+                       std::to_string(expected_cols) + "x" + std::to_string(expected_rows);
         return false;
     }
     const uintmax_t data_bytes = (uintmax_t) rows * (uintmax_t) cols * (uintmax_t) CV_ELEM_SIZE(type);
-    if (file_size(prior_path) != sizeof(header) + data_bytes) {
-        problem_text = "has " + std::to_string(file_size(prior_path)) + " bytes, the header needs " +
-                       std::to_string(sizeof(header) + data_bytes);
+    boost::system::error_code size_error;
+    const uintmax_t bytes = file_size(prior_path, size_error);
+    if (size_error || bytes != sizeof(header) + data_bytes) {
+        problem_text = size_error ? "has no readable size" : "has " + std::to_string(bytes) +
+                       " bytes, the header needs " + std::to_string(sizeof(header) + data_bytes);
         return false;
     }
     prior = cv::Mat(rows, cols, type);
@@ -943,14 +948,9 @@ void APD::LoadDepthPrior(int full_width, int full_height) {
     }
     cv::Mat prior;
     std::string problem_text;
-    if (!ReadDepthPriorFile(prior_path, prior, problem_text)) {
+    if (!ReadDepthPriorFile(prior_path, full_width, full_height, prior, problem_text)) {
         std::cout << "WARNING Depth prior " << prior_path << ": " << problem_text << "; view range used everywhere"
                   << std::endl;
-        return;
-    }
-    if (prior.cols != full_width || prior.rows != full_height) {
-        std::cout << "WARNING Depth prior " << prior_path << " is " << prior.cols << "x" << prior.rows
-                  << ", the image is " << full_width << "x" << full_height << "; view range used everywhere" << std::endl;
         return;
     }
     const int full_w = prior.cols;
