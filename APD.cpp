@@ -1,4 +1,6 @@
 #include "APD.h"
+#include <cfloat>
+#include <cmath>
 
 static std::shared_ptr<MemoryCache> memory_cache = nullptr;
 static std::mutex memory_cache_mutex;
@@ -504,6 +506,9 @@ APD::~APD() {
     cudaFree(view_weight_cuda);
     cudaFree(confidence_cuda);
     cudaFree(sa_mask_cuda);
+    if (prior_bounds_cuda != nullptr) {
+        cudaFree(prior_bounds_cuda);
+    }
 
     if (params_host.use_APD) {
         cudaFree(fit_plane_hypotheses_cuda);
@@ -608,6 +613,11 @@ void APD::InuputInitialization() {
         std::cout << "Scale images and cameras done\n";
     }
     std::cout << "Image size: " << width << " * " << height << std::endl;
+    // =================================================
+    // per-pixel depth prior (off by default)
+    if (params_host.prior_enable) {
+        LoadDepthPrior();
+    }
     // =================================================
     // read depth form geom consistency
     if (params_host.geom_consistency || params_host.use_APD) {
@@ -785,6 +795,11 @@ void APD::CudaSpaceInitialization() {
     cudaMalloc((void **) (&sa_mask_cuda), length * sizeof(uchar));
     cudaMemcpy(sa_mask_cuda, sa_mask_host.ptr<uchar>(0),
                length * sizeof(uchar), cudaMemcpyHostToDevice);
+    // per-pixel depth bounds (only when a prior was loaded)
+    if (!prior_bounds_host.empty()) {
+        cudaMalloc((void **) (&prior_bounds_cuda), length * sizeof(float2));
+        cudaMemcpy(prior_bounds_cuda, prior_bounds_host.ptr<float>(0), length * sizeof(float2), cudaMemcpyHostToDevice);
+    }
 
     if (params_host.use_APD) {
         // malloc memory for fit plane
@@ -830,6 +845,7 @@ void APD::SetDataPassHelperInCuda() {
     helper_host.weak_reliable_cuda = this->weak_reliable_cuda;
     helper_host.view_weight_cuda = this->view_weight_cuda;
     helper_host.weak_nearest_strong = this->weak_nearest_strong_cuda;
+    helper_host.prior_bounds_cuda = this->prior_bounds_cuda;
     cudaMalloc((void **) (&helper_cuda), sizeof(DataPassHelper));
     cudaMemcpy(helper_cuda, &helper_host, sizeof(DataPassHelper), cudaMemcpyHostToDevice);
 }
@@ -860,6 +876,87 @@ float APD::GetDepthMin() {
 
 float APD::GetDepthMax() {
     return params_host.depth_max;
+}
+
+bool APD::DepthInBounds(int r, int c, float depth) {
+    float lo = params_host.depth_min;                          // default: the view's search range
+    float hi = params_host.depth_max;
+    if (!prior_bounds_host.empty()) {
+        const cv::Vec2f b = prior_bounds_host.at<cv::Vec2f>(r, c);
+        if (b[1] > b[0]) {                                     // valid prior band replaces the view range
+            lo = b[0];
+            hi = b[1];
+        }
+    }
+    return depth >= lo && depth <= hi;
+}
+
+void APD::LoadDepthPrior() {
+    // The prior is stored once at the full (undistorted) image size: CV_32FC1 = prior depth (band from the
+    // prior.band_near / prior.band_far options) or CV_32FC2 = (lo, hi). 0 / non-finite / hi <= lo = no prior.
+    path prior_path = problem.dense_folder / path("depth_prior") / path(ToFormatIndex(problem.ref_image_id) + ".bin");
+    if (!exists(prior_path)) {
+        std::cout << "Depth prior missing (view range used everywhere): " << prior_path << std::endl;
+        return;
+    }
+    cv::Mat prior;
+    if (!ReadBinMat(prior_path, prior) || prior.empty()) {
+        std::cout << "Depth prior unreadable (view range used everywhere): " << prior_path << std::endl;
+        return;
+    }
+    const int full_w = prior.cols;
+    const int full_h = prior.rows;
+    cv::Mat full(full_h, full_w, CV_32FC2, cv::Scalar(0.0f, 0.0f));     // (lo, hi) at full size
+    for (int r = 0; r < full_h; ++r) {
+        for (int c = 0; c < full_w; ++c) {
+            float lo = 0.0f, hi = 0.0f;
+            if (prior.type() == CV_32FC2) {
+                const cv::Vec2f v = prior.at<cv::Vec2f>(r, c);
+                lo = v[0];
+                hi = v[1];
+            } else if (prior.type() == CV_32FC1) {
+                const float d = prior.at<float>(r, c);
+                if (d > 0.0f) {
+                    lo = d - params_host.prior_band_near;
+                    hi = d + params_host.prior_band_far;
+                }
+            }
+            if (std::isfinite(lo) && std::isfinite(hi) && lo > 0.0f && hi > lo) {
+                full.at<cv::Vec2f>(r, c) = cv::Vec2f(lo, hi);
+            }
+        }
+    }
+    // Pool to the working size: each working pixel covers full-size pixels [x / s - 0.5 / s, x / s + 0.5 / s] (APD
+    // scales K by s without a half-pixel shift); lo = min and hi = max over the valid ones, so coarse bands are
+    // conservative. A working pixel without any valid full-size pixel stays invalid (view range).
+    prior_bounds_host = cv::Mat(height, width, CV_32FC2, cv::Scalar(0.0f, 0.0f));
+    const float sx = width / static_cast<float>(full_w);
+    const float sy = height / static_cast<float>(full_h);
+    int valid = 0;
+    for (int r = 0; r < height; ++r) {
+        const int r0 = std::max(0, (int) std::floor((r - 0.5f) / sy));
+        const int r1 = std::min(full_h - 1, (int) std::ceil((r + 0.5f) / sy));
+        for (int c = 0; c < width; ++c) {
+            const int c0 = std::max(0, (int) std::floor((c - 0.5f) / sx));
+            const int c1 = std::min(full_w - 1, (int) std::ceil((c + 0.5f) / sx));
+            float lo = FLT_MAX, hi = -FLT_MAX;
+            for (int rr = r0; rr <= r1; ++rr) {
+                for (int cc = c0; cc <= c1; ++cc) {
+                    const cv::Vec2f b = full.at<cv::Vec2f>(rr, cc);
+                    if (b[1] > b[0]) {
+                        lo = std::min(lo, b[0]);
+                        hi = std::max(hi, b[1]);
+                    }
+                }
+            }
+            if (hi > lo) {
+                prior_bounds_host.at<cv::Vec2f>(r, c) = cv::Vec2f(lo, hi);
+                valid++;
+            }
+        }
+    }
+    std::cout << "Depth prior: " << prior_path.filename().string() << " " << full_w << "x" << full_h << " -> "
+              << width << "x" << height << ", valid " << valid << " / " << width * height << std::endl;
 }
 
 void RescaleImageAndCamera(cv::Mat &src, cv::Mat &dst, cv::Mat &depth, Camera &camera) {
