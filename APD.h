@@ -129,8 +129,9 @@ public:
     bool DepthInBounds(int r, int c, float depth);
 
 private:
-    // reads <dense>/depth_prior/<ref>.bin and pools it to the current image size (prior.enable only)
-    void LoadDepthPrior();
+    // reads <dense>/depth_prior/<ref>.bin (size full_width x full_height, the image before APD's scaling) and pools
+    // it to the current image size (prior.enable only)
+    void LoadDepthPrior(int full_width, int full_height);
 
     cv::Mat prior_bounds_host;      // CV_32FC2 (lo, hi) at the working size; empty when the prior is off
     float2 *prior_bounds_cuda = nullptr;

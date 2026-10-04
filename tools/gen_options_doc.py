@@ -42,6 +42,34 @@ maps, and `patchmatch` when the depth maps must be recomputed.
   shared state in GPU scheduling order. Compare settings over repeated runs.
 - `views.*` options change the source-view lists and therefore also apply to `--only_fuse true`.
 
+## Per-pixel depth prior (`prior.*`)
+
+With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each reference view:
+
+- Format: APD BinMat, i.e. four int32 values (version 1, rows, cols, OpenCV type) followed by the row-major
+  pixel data. Type `CV_32FC1` holds a prior depth, turned into the band
+  `[depth - prior.band_near, depth + prior.band_far]`; type `CV_32FC2` holds the band itself as `(lo, hi)`,
+  and the two band options are then unused. Any other type disables the prior for that view, with a warning.
+- Values are camera-frame z-depths (the quantity in `depths.bin`, not the distance along the ray) in the
+  world units of the cam files. They are absolute: `depth.range_scale_*` and `depth.range_pad` do not apply.
+- Size and pixel convention: the map must have the size of `<dense>/images/<ref>` (the undistorted scene
+  image, before APD's own scaling); any other size disables the prior for that view, with a warning. Pixel
+  (x, y) is the ray through image position (x, y) of the cam-file K (pixel centres at integer coordinates).
+- 0, a non-finite value, a non-positive `lo` or `hi <= lo` mean "no prior here": that pixel keeps the view's
+  depth range. A file with no valid pixel, a missing file or an unreadable file disables the prior for the
+  view with a warning.
+- At each scale the map is pooled to the working size: a working pixel takes the minimum `lo` and maximum
+  `hi` of the full-size pixels whose centres lie in its footprint (at full size, its own band).
+- Inside the band APD draws its random initial depths, refinement candidates and perturbations, accepts
+  propagated planes, evaluates the weak/strong cost curve, runs the final local refinement, and finally
+  sets depths outside the band to 0. Side effects of a narrow band: the weak/strong cost curve sees only the
+  depths inside the band, so more pixels are classified STRONG; the median filter of STRONG pixels is not
+  confined to the band, so a filtered depth that leaves it becomes 0; when the inherited depth of a later
+  round lies outside the band (or is 0), the pixel is re-seeded randomly inside its band, and with a prior
+  loaded a pixel without a band is re-seeded inside the view range in the same way.
+- Units: the `prior.band_*` defaults (0.0005) are 0.5 mm only when the world unit is the metre.
+- With a prior loaded, the depth perturbation is always clipped to the pixel's band (`pm.perturbation_clip`).
+
 ## Reference
 
 | Option | Type | Default | Range / choices | Unit | Stage | Description |

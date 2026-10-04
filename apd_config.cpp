@@ -290,21 +290,23 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
     perturbation_modes.push_back("range");
     perturbation_modes.push_back("absolute");
     Add("pm.depth_perturbation_mode", OPTION_ENUM, &m.depth_perturbation_mode, false, 0, 0, PM, "",
-        "Depth perturbation window: relative = +-depth_perturbation * depth (upstream; about +-60 mm at a 3 m "
-        "pinhole-equivalent depth), range = +-depth_perturbation * width of the pixel's search range, "
-        "absolute = +-depth_perturbation_abs; range and absolute are clipped to the search range",
+        "Depth perturbation window: relative = +-depth_perturbation * depth (upstream; for a long-focal pinhole "
+        "approximation of a telecentric lens the depth is metres, so the window is far wider than the object), "
+        "range = +-depth_perturbation * width of the pixel's search range, absolute = +-depth_perturbation_abs; "
+        "range and absolute are clipped to the search range",
         perturbation_modes);
     Add("pm.depth_perturbation_abs", OPTION_FLOAT, &m.depth_perturbation_abs, true, 0, BIG, PM, "world",
-        "Half-width of the absolute depth perturbation (depth_perturbation_mode = absolute)");
+        "Half-width of the absolute depth perturbation (depth_perturbation_mode = absolute; must then be > 0)");
     Add("pm.perturbation_clip", OPTION_BOOL, &m.perturbation_clip, false, 0, 0, PM, "",
         "Draw the perturbed depth inside the pixel's search range (upstream's retry loop never retries); "
         "always on for the range/absolute modes and with a depth prior");
 
     // ---------------------------------------------------------------- per-pixel depth prior
     Add("prior.enable", OPTION_BOOL, &m.prior_enable, false, 0, 0, PM, "",
-        "Read <dense>/depth_prior/<ref>.bin (BinMat, full image size; float depth or float2 lo/hi, 0 = none) and "
-        "confine init, refinement, perturbation and propagation of each pixel to its band; pixels without a "
-        "prior keep the view range. Prior depths are absolute (not scaled by depth.range_scale_*)");
+        "Read <dense>/depth_prior/<ref>.bin (BinMat at the image size; float z-depth or float2 lo/hi, 0 = none; "
+        "see Notes) and confine each pixel's random init, refinement, perturbation, propagation, weak/strong "
+        "cost curve, final refinement and output filter to its band; pixels without a prior keep the view range. "
+        "Prior depths are absolute (not scaled by depth.range_scale_* or padded by depth.range_pad)");
     Add("prior.band_near", OPTION_FLOAT, &m.prior_band_near, true, 0, BIG, PM, "world",
         "Band towards the camera around a 1-channel prior depth: lo = prior - this");
     Add("prior.band_far", OPTION_FLOAT, &m.prior_band_far, true, 0, BIG, PM, "world",
@@ -495,6 +497,10 @@ bool OptionRegistry::Validate(std::string &error) const {
     }
     if (config.pipeline.weak_peak_min > config.pipeline.weak_peak_start) {
         error = "pipeline.weak_peak_min must not exceed pipeline.weak_peak_start";
+        return false;
+    }
+    if (m.depth_perturbation_mode == 2 && !(m.depth_perturbation_abs > 0.0f)) {
+        error = "pm.depth_perturbation_mode = absolute needs pm.depth_perturbation_abs > 0";
         return false;
     }
     return true;

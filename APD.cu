@@ -339,6 +339,15 @@ __device__ __forceinline__ bool DepthInPixelBounds(const DataPassHelper* helper,
 	return depth >= lo && depth <= hi;
 }
 
+// True when depth lies outside the pixel's search bounds. Not the negation of DepthInPixelBounds for NaN: it keeps
+// upstream's "d < min || d > max" form where upstream used it, so a NaN depth is not rejected there.
+__device__ __forceinline__ bool DepthOutsidePixelBounds(const DataPassHelper* helper, const int center, const float depth)
+{
+	float lo, hi;
+	PixelDepthBounds(helper, center, &lo, &hi);
+	return depth < lo || depth > hi;
+}
+
 // Perturbed depth for hypothesis refinement, one uniform draw. With the default options this is the upstream
 // expression (+-depth_perturbation * depth, whose && retry loop never repeats). Otherwise the window is local
 // (relative, a fraction of the pixel's search range, or absolute) and clipped to [lo, hi].
@@ -368,8 +377,11 @@ __device__ float PerturbDepth(const PatchMatchParams* params, curandState* rand_
 	}
 	a = fmaxf(a, lo);
 	b = fminf(b, hi);
-	if (!(b > a)) {                          // current depth outside the bounds: draw anywhere inside them
-		a = lo;
+	if (!(b > a)) {
+		if (depth_now >= lo && depth_now <= hi) {
+			return depth_now;                    // zero-width window inside the bounds: no perturbation
+		}
+		a = lo;                              // current depth outside the bounds: draw anywhere inside them
 		b = hi;
 	}
 	return u * (b - a) + a;
@@ -383,6 +395,8 @@ __device__ float4 GenerateRandomPlaneHypothesis(const Camera& camera, const int2
 	return plane_hypothesis;
 }
 
+// Upstream helper, not called anywhere (its retry loop has the same never-true && condition as upstream's
+// refinement); hypothesis refinement uses PerturbDepth.
 __device__ float4 GeneratePertubedPlaneHypothesis(const Camera& camera, const int2 p, curandState* rand_state, const float perturbation, const float4 plane_hypothesis_now, const float depth_now, const float depth_min, const float depth_max)
 {
 	float depth_perturbed = depth_now;
@@ -1072,7 +1086,6 @@ __device__ void PlaneHypothesisRefinementStrong(
 	DataPassHelper* helper
 
 ) {
-	float depth_perturbation = helper->params->depth_perturbation;
 	float normal_perturbation = helper->params->normal_perturbation;
 	const Camera* cameras = helper->cameras_cuda;
 	const PatchMatchParams* params = helper->params;
@@ -1082,7 +1095,6 @@ __device__ void PlaneHypothesisRefinementStrong(
 
 	float depth_rand = curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
 	float4 plane_hypothesis_rand = GenerateRandomNormal(cameras[0], p, rand_state, *depth);
-	(void)depth_perturbation;
 	const float depth_perturbed = PerturbDepth(params, rand_state, *depth, depth_min, depth_max, helper->prior_bounds_cuda != nullptr);
 	float4 plane_hypothesis_perturbed = GeneratePerturbedNormal(cameras[0], p, *plane_hypothesis, rand_state, normal_perturbation * M_PI);
 
@@ -1127,7 +1139,6 @@ __device__ void PlaneHypothesisRefinementWeak(
 	DataPassHelper* helper
 
 ) {
-	float depth_perturbation = helper->params->depth_perturbation;
 	float normal_perturbation = helper->params->normal_perturbation;
 	const Camera* cameras = helper->cameras_cuda;
 	const PatchMatchParams* params = helper->params;
@@ -1166,7 +1177,6 @@ __device__ void PlaneHypothesisRefinementWeak(
 	{
 		float depth_rand = curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
 		float4 plane_hypothesis_rand = GenerateRandomNormal(cameras[0], p, rand_state, *depth);
-		(void)depth_perturbation;
 		const float depth_perturbed = PerturbDepth(params, rand_state, *depth, depth_min, depth_max, helper->prior_bounds_cuda != nullptr);
 		float4 plane_hypothesis_perturbed = GeneratePerturbedNormal(cameras[0], p, *plane_hypothesis, rand_state, normal_perturbation * M_PI);
 
@@ -2273,7 +2283,7 @@ __global__ void DepthToWeak(DataPassHelper *helper, float *reliable_curve) {
 	for (int p_disp = -radius * increment; p_disp <= radius * increment; p_disp += increment) {
 
 		float p_depth = cameras[0].K[0] * base_line / (disp + p_disp);
-		if (!DepthInPixelBounds(helper, center, p_depth)) {   // view range or prior band
+		if (DepthOutsidePixelBounds(helper, center, p_depth)) {   // view range or prior band
 			p_costs[p_disp + radius] = 2.0f;
 			continue;
 		}
@@ -2515,7 +2525,7 @@ __global__ void LocalRefine(DataPassHelper* helper) {
 	float best_depth = origin_depth;
 	for (int p_disp = -radius; p_disp <= radius; ++p_disp) {
 		float p_depth = cameras[0].K[0] * base_line / (disp + p_disp);
-		if (!DepthInPixelBounds(helper, center, p_depth)) {   // view range or prior band
+		if (DepthOutsidePixelBounds(helper, center, p_depth)) {   // view range or prior band
 			continue;
 		}
 		float4 temp_plane_hypothesis = origin_plane_hypothesis;

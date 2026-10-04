@@ -586,6 +586,8 @@ void APD::InuputInitialization() {
     std::cout << "Depth range: " << params_host.depth_min << " " << params_host.depth_max << std::endl;
     std::cout << "Num images: " << params_host.num_images << std::endl;
     // =================================================
+    const int full_width = width;                                  // reference image size before scaling (prior size)
+    const int full_height = height;
     // scale images
     if (problem.scale_size != 1) {
         for (int i = 0; i < num_images; ++i) {
@@ -616,7 +618,7 @@ void APD::InuputInitialization() {
     // =================================================
     // per-pixel depth prior (off by default)
     if (params_host.prior_enable) {
-        LoadDepthPrior();
+        LoadDepthPrior(full_width, full_height);
     }
     // =================================================
     // read depth form geom consistency
@@ -888,20 +890,31 @@ bool APD::DepthInBounds(int r, int c, float depth) {
             hi = b[1];
         }
     }
-    return depth >= lo && depth <= hi;
+    return !(depth < lo || depth > hi);                        // upstream's test: a NaN depth is not rejected here
 }
 
-void APD::LoadDepthPrior() {
-    // The prior is stored once at the full (undistorted) image size: CV_32FC1 = prior depth (band from the
-    // prior.band_near / prior.band_far options) or CV_32FC2 = (lo, hi). 0 / non-finite / hi <= lo = no prior.
+void APD::LoadDepthPrior(int full_width, int full_height) {
+    // The prior is stored once at the reference image's own size (before APD's scaling): CV_32FC1 = prior depth
+    // (band from the prior.band_near / prior.band_far options) or CV_32FC2 = (lo, hi), camera-frame z in world units.
+    // 0 / non-finite / hi <= lo = no prior at that pixel.
     path prior_path = problem.dense_folder / path("depth_prior") / path(ToFormatIndex(problem.ref_image_id) + ".bin");
     if (!exists(prior_path)) {
-        std::cout << "Depth prior missing (view range used everywhere): " << prior_path << std::endl;
+        std::cout << "WARNING Depth prior missing (view range used everywhere): " << prior_path << std::endl;
         return;
     }
     cv::Mat prior;
     if (!ReadBinMat(prior_path, prior) || prior.empty()) {
-        std::cout << "Depth prior unreadable (view range used everywhere): " << prior_path << std::endl;
+        std::cout << "WARNING Depth prior unreadable (view range used everywhere): " << prior_path << std::endl;
+        return;
+    }
+    if (prior.type() != CV_32FC1 && prior.type() != CV_32FC2) {
+        std::cout << "WARNING Depth prior " << prior_path << " has OpenCV type " << prior.type()
+                  << " (expected CV_32FC1 depth or CV_32FC2 lo/hi); view range used everywhere" << std::endl;
+        return;
+    }
+    if (prior.cols != full_width || prior.rows != full_height) {
+        std::cout << "WARNING Depth prior " << prior_path << " is " << prior.cols << "x" << prior.rows
+                  << ", the image is " << full_width << "x" << full_height << "; view range used everywhere" << std::endl;
         return;
     }
     const int full_w = prior.cols;
@@ -914,7 +927,7 @@ void APD::LoadDepthPrior() {
                 const cv::Vec2f v = prior.at<cv::Vec2f>(r, c);
                 lo = v[0];
                 hi = v[1];
-            } else if (prior.type() == CV_32FC1) {
+            } else {
                 const float d = prior.at<float>(r, c);
                 if (d > 0.0f) {
                     lo = d - params_host.prior_band_near;
@@ -926,19 +939,27 @@ void APD::LoadDepthPrior() {
             }
         }
     }
-    // Pool to the working size: each working pixel covers full-size pixels [x / s - 0.5 / s, x / s + 0.5 / s] (APD
-    // scales K by s without a half-pixel shift); lo = min and hi = max over the valid ones, so coarse bands are
-    // conservative. A working pixel without any valid full-size pixel stays invalid (view range).
+    // Pool to the working size. APD scales K by s without a half-pixel shift, so working pixel x sits at full-size
+    // coordinate x / s and covers [(x - 0.5) / s, (x + 0.5) / s]; the full-size pixels whose centres fall inside that
+    // footprint are pooled (lo = min, hi = max over the valid ones), the nearest one when none does. At s = 1 every
+    // pixel keeps its own band. A working pixel without any valid full-size pixel stays invalid (view range).
     prior_bounds_host = cv::Mat(height, width, CV_32FC2, cv::Scalar(0.0f, 0.0f));
     const float sx = width / static_cast<float>(full_w);
     const float sy = height / static_cast<float>(full_h);
+    auto footprint = [](int x, float s, int n, int &lo_idx, int &hi_idx) {
+        lo_idx = std::max(0, (int) std::ceil((x - 0.5f) / s));
+        hi_idx = std::min(n - 1, (int) std::floor((x + 0.5f) / s));
+        if (hi_idx < lo_idx) {                                   // upsampling: no centre inside, take the nearest
+            lo_idx = hi_idx = std::min(n - 1, std::max(0, (int) std::lround(x / s)));
+        }
+    };
     int valid = 0;
     for (int r = 0; r < height; ++r) {
-        const int r0 = std::max(0, (int) std::floor((r - 0.5f) / sy));
-        const int r1 = std::min(full_h - 1, (int) std::ceil((r + 0.5f) / sy));
+        int r0, r1;
+        footprint(r, sy, full_h, r0, r1);
         for (int c = 0; c < width; ++c) {
-            const int c0 = std::max(0, (int) std::floor((c - 0.5f) / sx));
-            const int c1 = std::min(full_w - 1, (int) std::ceil((c + 0.5f) / sx));
+            int c0, c1;
+            footprint(c, sx, full_w, c0, c1);
             float lo = FLT_MAX, hi = -FLT_MAX;
             for (int rr = r0; rr <= r1; ++rr) {
                 for (int cc = c0; cc <= c1; ++cc) {
@@ -957,6 +978,10 @@ void APD::LoadDepthPrior() {
     }
     std::cout << "Depth prior: " << prior_path.filename().string() << " " << full_w << "x" << full_h << " -> "
               << width << "x" << height << ", valid " << valid << " / " << width * height << std::endl;
+    if (valid == 0) {                                          // nothing usable: behave exactly as without a prior
+        std::cout << "WARNING Depth prior " << prior_path << " has no valid pixel; view range used everywhere" << std::endl;
+        prior_bounds_host.release();
+    }
 }
 
 void RescaleImageAndCamera(cv::Mat &src, cv::Mat &dst, cv::Mat &depth, Camera &camera) {
