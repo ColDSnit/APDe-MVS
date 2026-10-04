@@ -101,6 +101,12 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 | `pm.local_refine_radius` | int | 5 | 0 .. 64 | steps | patchmatch | Search radius of the final refinement |
 | `pm.local_refine_margin` | float | 0.1 | 0 .. 2 | cost | patchmatch | Cost improvement needed to accept the refined depth |
 | `pm.rng_seed` | int | -1 | -1 .. 9e+18 |  | patchmatch | Random seed (<0: seed from the clock, runs are not repeatable) |
+| `pm.depth_perturbation_mode` | enum | relative | relative, range, absolute |  | patchmatch | Depth perturbation window: relative = +-depth_perturbation * depth (upstream; about +-60 mm at a 3 m pinhole-equivalent depth), range = +-depth_perturbation * width of the pixel's search range, absolute = +-depth_perturbation_abs; range and absolute are clipped to the search range |
+| `pm.depth_perturbation_abs` | float | 0 | 0 .. 1e+09 | world | patchmatch | Half-width of the absolute depth perturbation (depth_perturbation_mode = absolute) |
+| `pm.perturbation_clip` | bool | false |  |  | patchmatch | Draw the perturbed depth inside the pixel's search range (upstream's retry loop never retries); always on for the range/absolute modes and with a depth prior |
+| `prior.enable` | bool | false |  |  | patchmatch | Read <dense>/depth_prior/<ref>.bin (BinMat, full image size; float depth or float2 lo/hi, 0 = none) and confine init, refinement, perturbation and propagation of each pixel to its band; pixels without a prior keep the view range. Prior depths are absolute (not scaled by depth.range_scale_*) |
+| `prior.band_near` | float | 0.0005 | 0 .. 1e+09 | world | patchmatch | Band towards the camera around a 1-channel prior depth: lo = prior - this |
+| `prior.band_far` | float | 0.0005 | 0 .. 1e+09 | world | patchmatch | Band away from the camera around a 1-channel prior depth: hi = prior + this |
 | `viewsel.prior_selected` | float | 0.9 | 0 .. 1 |  | patchmatch | Prior of a view that a neighbouring pixel selected |
 | `viewsel.prior_unselected` | float | 0.1 | 0 .. 1 |  | patchmatch | Prior of a view that a neighbouring pixel did not select |
 | `viewsel.cost_thresh_init` | float | 0.8 | 0 .. 2 | cost | patchmatch | Good-cost threshold = init * exp(-iteration^2 / decay) |

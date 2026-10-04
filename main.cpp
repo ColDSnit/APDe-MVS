@@ -259,7 +259,8 @@ void ProcessProblem(Problem &problem) {
         for (int c = 0; c < width; ++c) {
             float4 plane_hypothesis = APD.GetPlaneHypothesis(r, c);
             depth.at<float>(r, c) = plane_hypothesis.w;
-            if (depth.at<float>(r, c) < APD.GetDepthMin() || depth.at<float>(r, c) > APD.GetDepthMax()) {
+            // view range, or the pixel's prior band when a depth prior is loaded (identical without one)
+            if (!APD.DepthInBounds(r, c, depth.at<float>(r, c))) {
                 depth.at<float>(r, c) = 0;
                 pixel_states.at<uchar>(r, c) = UNKNOWN;
             }

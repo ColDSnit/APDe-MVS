@@ -317,6 +317,64 @@ __device__ float4 GeneratePerturbedNormal(const Camera& camera, const int2 p, co
 	return normal_perturbed;
 }
 
+// Search bounds of one pixel: its prior band when a valid one is loaded (prior.enable), else the view's range.
+__device__ __forceinline__ void PixelDepthBounds(const DataPassHelper* helper, const int center, float* lo, float* hi)
+{
+	*lo = helper->params->depth_min;
+	*hi = helper->params->depth_max;
+	if (helper->prior_bounds_cuda != nullptr) {
+		const float2 b = helper->prior_bounds_cuda[center];
+		if (b.y > b.x) {                     // hi <= lo marks "no prior here"
+			*lo = b.x;
+			*hi = b.y;
+		}
+	}
+}
+
+// True when depth lies inside the pixel's search bounds (identical to the view-range test without a prior).
+__device__ __forceinline__ bool DepthInPixelBounds(const DataPassHelper* helper, const int center, const float depth)
+{
+	float lo, hi;
+	PixelDepthBounds(helper, center, &lo, &hi);
+	return depth >= lo && depth <= hi;
+}
+
+// Perturbed depth for hypothesis refinement, one uniform draw. With the default options this is the upstream
+// expression (+-depth_perturbation * depth, whose && retry loop never repeats). Otherwise the window is local
+// (relative, a fraction of the pixel's search range, or absolute) and clipped to [lo, hi].
+__device__ float PerturbDepth(const PatchMatchParams* params, curandState* rand_state, const float depth_now,
+	const float lo, const float hi, const bool prior_on)
+{
+	const float u = curand_uniform(rand_state);
+	const int mode = params->depth_perturbation_mode;
+	if (mode == 0 && !params->perturbation_clip && !prior_on) {
+		const float depth_min_perturbed = (1 - params->depth_perturbation) * depth_now;   // upstream, unchanged
+		const float depth_max_perturbed = (1 + params->depth_perturbation) * depth_now;
+		return u * (depth_max_perturbed - depth_min_perturbed) + depth_min_perturbed;
+	}
+	float a, b;
+	if (mode == 1) {                         // fraction of the pixel's search range width
+		const float half = params->depth_perturbation * (hi - lo);
+		a = depth_now - half;
+		b = depth_now + half;
+	}
+	else if (mode == 2) {                    // absolute half-width in world units
+		a = depth_now - params->depth_perturbation_abs;
+		b = depth_now + params->depth_perturbation_abs;
+	}
+	else {                                   // relative, as upstream, but clipped
+		a = (1 - params->depth_perturbation) * depth_now;
+		b = (1 + params->depth_perturbation) * depth_now;
+	}
+	a = fmaxf(a, lo);
+	b = fminf(b, hi);
+	if (!(b > a)) {                          // current depth outside the bounds: draw anywhere inside them
+		a = lo;
+		b = hi;
+	}
+	return u * (b - a) + a;
+}
+
 __device__ float4 GenerateRandomPlaneHypothesis(const Camera& camera, const int2 p, curandState* rand_state, const float depth_min, const float depth_max)
 {
 	float depth = curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
@@ -980,8 +1038,10 @@ __global__ void RandomInitialization(
 	curandState* rand_states = helper->rand_states_cuda;
 	PatchMatchParams* params = helper->params;
 
+	float depth_lo, depth_hi;
+	PixelDepthBounds(helper, center, &depth_lo, &depth_hi);       // view range, or this pixel's prior band
 	if (params->state == FIRST_INIT) {
-		plane_hypotheses[center] = GenerateRandomPlaneHypothesis(cameras[0], p, &rand_states[center], params->depth_min, params->depth_max);
+		plane_hypotheses[center] = GenerateRandomPlaneHypothesis(cameras[0], p, &rand_states[center], depth_lo, depth_hi);
 		costs[center] = ComputeMultiViewInitialCostandSelectedViews(p, helper);
 	}
 	else {
@@ -989,7 +1049,13 @@ __global__ void RandomInitialization(
 		plane_hypothesis = plane_hypotheses[center];
 		plane_hypothesis = TransformNormal2RefCam(cameras[0], plane_hypothesis);
 		float depth = plane_hypothesis.w;
-		plane_hypothesis.w = GetDistance2Origin(cameras[0], p, depth, plane_hypothesis);
+		if (helper->prior_bounds_cuda != nullptr && (depth < depth_lo || depth > depth_hi)) {
+			// prior on: an inherited depth outside the band (or 0 = none) is re-seeded randomly inside it
+			plane_hypothesis = GenerateRandomPlaneHypothesis(cameras[0], p, &rand_states[center], depth_lo, depth_hi);
+		}
+		else {
+			plane_hypothesis.w = GetDistance2Origin(cameras[0], p, depth, plane_hypothesis);
+		}
 		plane_hypotheses[center] = plane_hypothesis;
 		costs[center] = ComputeMultiViewInitialCostandSelectedViews(p, helper);
 	}
@@ -1012,15 +1078,12 @@ __device__ void PlaneHypothesisRefinementStrong(
 	const PatchMatchParams* params = helper->params;
 	float depth_min = params->depth_min;
 	float depth_max = params->depth_max;
+	PixelDepthBounds(helper, p.y * helper->width + p.x, &depth_min, &depth_max);   // prior band if loaded
 
 	float depth_rand = curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
 	float4 plane_hypothesis_rand = GenerateRandomNormal(cameras[0], p, rand_state, *depth);
-	float depth_perturbed = *depth;
-	const float depth_min_perturbed = (1 - depth_perturbation) * depth_perturbed;
-	const float depth_max_perturbed = (1 + depth_perturbation) * depth_perturbed;
-	do {
-		depth_perturbed = curand_uniform(rand_state) * (depth_max_perturbed - depth_min_perturbed) + depth_min_perturbed;
-	} while (depth_perturbed < depth_min && depth_perturbed > depth_max);
+	(void)depth_perturbation;
+	const float depth_perturbed = PerturbDepth(params, rand_state, *depth, depth_min, depth_max, helper->prior_bounds_cuda != nullptr);
 	float4 plane_hypothesis_perturbed = GeneratePerturbedNormal(cameras[0], p, *plane_hypothesis, rand_state, normal_perturbation * M_PI);
 
 	const int num_planes = 5;
@@ -1071,6 +1134,7 @@ __device__ void PlaneHypothesisRefinementWeak(
 	float depth_min = params->depth_min;
 	float depth_max = params->depth_max;
 	const int center = p.x + p.y * helper->width;
+	PixelDepthBounds(helper, center, &depth_min, &depth_max);    // prior band if loaded
 	{   // test the fit plane
 		float4 fit_plane_hypothesis = helper->fit_plane_hypotheses_cuda[center];
 		if (fit_plane_hypothesis.x == 0 && fit_plane_hypothesis.y == 0 && fit_plane_hypothesis.z == 0) {
@@ -1102,12 +1166,8 @@ __device__ void PlaneHypothesisRefinementWeak(
 	{
 		float depth_rand = curand_uniform(rand_state) * (depth_max - depth_min) + depth_min;
 		float4 plane_hypothesis_rand = GenerateRandomNormal(cameras[0], p, rand_state, *depth);
-		float depth_perturbed = *depth;
-		const float depth_min_perturbed = (1 - depth_perturbation) * depth_perturbed;
-		const float depth_max_perturbed = (1 + depth_perturbation) * depth_perturbed;
-		do {
-			depth_perturbed = curand_uniform(rand_state) * (depth_max_perturbed - depth_min_perturbed) + depth_min_perturbed;
-		} while (depth_perturbed < depth_min && depth_perturbed > depth_max);
+		(void)depth_perturbation;
+		const float depth_perturbed = PerturbDepth(params, rand_state, *depth, depth_min, depth_max, helper->prior_bounds_cuda != nullptr);
 		float4 plane_hypothesis_perturbed = GeneratePerturbedNormal(cameras[0], p, *plane_hypothesis, rand_state, normal_perturbation * M_PI);
 
 		const int num_planes = 5;
@@ -1466,7 +1526,8 @@ __device__ void CheckerboardPropagationStrong(
 	if (flag[min_cost_idx]) {
 		float depth_before = ComputeDepthfromPlaneHypothesis(cameras[0], plane_hypotheses[positions[min_cost_idx]], p);
 
-		if (depth_before >= params->depth_min && depth_before <= params->depth_max && final_costs[min_cost_idx] < cost_now) {
+		// a neighbour's plane whose depth here leaves this pixel's bounds (view range or prior band) is rejected
+		if (DepthInPixelBounds(helper, center, depth_before) && final_costs[min_cost_idx] < cost_now) {
 			depth_now = depth_before;
 			plane_hypotheses_now = plane_hypotheses[positions[min_cost_idx]];
 			cost_now = final_costs[min_cost_idx];
@@ -1641,7 +1702,8 @@ __device__ void CheckerboardPropagationWeak(
 
 	if (flag[min_cost_idx]) {
 		float depth_before = ComputeDepthfromPlaneHypothesis(cameras[0], new_plane_hypothesis[min_cost_idx], p);
-		if (depth_before >= params->depth_min && depth_before <= params->depth_max && final_costs[min_cost_idx] < cost_now) {
+		// a neighbour's plane whose depth here leaves this pixel's bounds (view range or prior band) is rejected
+		if (DepthInPixelBounds(helper, center, depth_before) && final_costs[min_cost_idx] < cost_now) {
 			depth_now = depth_before;
 			plane_hypotheses_now = new_plane_hypothesis[min_cost_idx];
 			cost_now = final_costs[min_cost_idx];
@@ -2211,7 +2273,7 @@ __global__ void DepthToWeak(DataPassHelper *helper, float *reliable_curve) {
 	for (int p_disp = -radius * increment; p_disp <= radius * increment; p_disp += increment) {
 
 		float p_depth = cameras[0].K[0] * base_line / (disp + p_disp);
-		if (p_depth < helper->params->depth_min || p_depth > helper->params->depth_max) {
+		if (!DepthInPixelBounds(helper, center, p_depth)) {   // view range or prior band
 			p_costs[p_disp + radius] = 2.0f;
 			continue;
 		}
@@ -2453,7 +2515,7 @@ __global__ void LocalRefine(DataPassHelper* helper) {
 	float best_depth = origin_depth;
 	for (int p_disp = -radius; p_disp <= radius; ++p_disp) {
 		float p_depth = cameras[0].K[0] * base_line / (disp + p_disp);
-		if (p_depth < helper->params->depth_min || p_depth > helper->params->depth_max) {
+		if (!DepthInPixelBounds(helper, center, p_depth)) {   // view range or prior band
 			continue;
 		}
 		float4 temp_plane_hypothesis = origin_plane_hypothesis;
