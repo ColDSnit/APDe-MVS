@@ -1207,6 +1207,11 @@ void RunFusion(
                           << std::endl;
                 continue;
             }
+            if (sa.type() != CV_8UC1) {                              // one-channel 8-bit object mask expected
+                std::cout << "WARNING silhouette_trim_px: " << sa_path << " is not a 1-channel 8-bit mask (type "
+                          << sa.type() << "), not trimmed" << std::endl;
+                continue;
+            }
             cv::Mat inside;
             cv::resize(sa != 0, inside, cv::Size(depths[idx].cols, depths[idx].rows), 0, 0, cv::INTER_NEAREST);
             cv::Mat outside = (inside == 0);
@@ -1232,9 +1237,11 @@ void RunFusion(
     const float incident_cos_min = use_incident_max ? cosf(fp.incident_max_deg * (float) M_PI / 180.0f) : -2.0f;
     const float incident_two_sigma2 = use_incident_prior ?
         2.0f * powf(fp.incident_sigma_deg * (float) M_PI / 180.0f, 2.0f) : 1.0f;
-    // cosine of the angle between a pixel normal (world frame) and the direction from its 3D point to its camera
+    // cosine of the angle between a pixel normal (world frame) and the direction from its 3D point to its camera;
+    // an orthographic camera looks along its optical axis everywhere, so the direction is minus the axis (row 3 of R)
     auto incident_cos = [](const cv::Vec3f &n, const float3 &X, const Camera &cam) {
-        cv::Vec3f v(cam.c[0] - X.x, cam.c[1] - X.y, cam.c[2] - X.z);
+        cv::Vec3f v = (cam.model == CAMERA_ORTHOGRAPHIC) ? cv::Vec3f(-cam.R[6], -cam.R[7], -cam.R[8])
+                                                         : cv::Vec3f(cam.c[0] - X.x, cam.c[1] - X.y, cam.c[2] - X.z);
         const float nn = (float) cv::norm(n), vn = (float) cv::norm(v);
         return (nn > 0.0f && vn > 0.0f) ? (float) n.dot(v) / (nn * vn) : 1.0f;
     };
