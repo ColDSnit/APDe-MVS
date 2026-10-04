@@ -36,6 +36,13 @@ struct FusionParams {
     bool average_position = false;         // true: fused point = mean of the agreeing 3D points
     float view_min_angle_deg = -1.0f;      // <0 disables; else skip source views whose optical axis is closer
     float view_max_angle_deg = -1.0f;      // <0 disables; else skip source views whose optical axis is further
+    // Grazing-view guards (feat/fusion-grazing-guard; all off by default = upstream behaviour).
+    float incident_max_deg = -1.0f;        // <0 disables; else a pixel takes part (as reference or as source) only if the
+                                           // angle between its normal and the direction to its own camera is <= this
+    float incident_sigma_deg = -1.0f;      // <=0 disables; else soft incident prior exp(-k^2 / 2 sigma^2) (Schoenberger et
+                                           // al. 2016, sigma 45 deg): weights each source term and the reference score
+    int silhouette_trim_px = 0;            // 0 disables; else pixels within this many depth-map pixels of the view's own
+                                           // silhouette edge (scene/sa_masks, nonzero = object) take no part in fusion
 };
 
 // Options of WeakVisFilter (drops WEAK pixels that other views see through).

@@ -54,6 +54,9 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 | `fusion.average_position` | bool | false |  |  | fusion | Fused point = mean of the reference point and the agreeing source points (false: reference point) |
 | `fusion.view_min_angle_deg` | float | -1 | -1 .. 180 | deg | fusion | Skip source views whose optical axis is closer than this to the reference axis (<0: off) |
 | `fusion.view_max_angle_deg` | float | -1 | -1 .. 180 | deg | fusion | Skip source views whose optical axis is further than this from the reference axis (<0: off) |
+| `fusion.incident_max_deg` | float | -1 | -1 .. 180 | deg | fusion | A pixel takes part in fusion (as reference or source) only if the angle between its normal and the direction to its own camera is at most this (<0: off) |
+| `fusion.incident_sigma_deg` | float | -1 | -1 .. 180 | deg | fusion | Soft incident-angle prior exp(-k^2/2s^2) on every source term and on the reference score (<0: off; Schoenberger et al. 2016 use 45) |
+| `fusion.silhouette_trim_px` | int | 0 | 0 .. 100000 | px | fusion | Pixels within this many depth-map pixels of the view's silhouette edge (scene/sa_masks) take no part in fusion (0: off) |
 | `weakfilter.max_view_angle_deg` | float | 80 | 0 .. 180 | deg | fusion | Source views separated by more than this angle at the point are ignored |
 | `weakfilter.depth_mode` | enum | relative | relative, absolute |  | fusion | Occlusion margin type: relative or absolute |
 | `weakfilter.depth_rel` | float | 0.01 | 0 .. 1e+09 | ratio | fusion | Occlusion margin relative to the source depth |
