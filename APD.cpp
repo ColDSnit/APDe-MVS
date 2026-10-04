@@ -1,4 +1,6 @@
 #include "APD.h"
+#include <cfloat>
+#include <cmath>
 
 static std::shared_ptr<MemoryCache> memory_cache = nullptr;
 static std::mutex memory_cache_mutex;
@@ -504,6 +506,9 @@ APD::~APD() {
     cudaFree(view_weight_cuda);
     cudaFree(confidence_cuda);
     cudaFree(sa_mask_cuda);
+    if (prior_bounds_cuda != nullptr) {
+        cudaFree(prior_bounds_cuda);
+    }
 
     if (params_host.use_APD) {
         cudaFree(fit_plane_hypotheses_cuda);
@@ -581,6 +586,8 @@ void APD::InuputInitialization() {
     std::cout << "Depth range: " << params_host.depth_min << " " << params_host.depth_max << std::endl;
     std::cout << "Num images: " << params_host.num_images << std::endl;
     // =================================================
+    const int full_width = width;                                  // reference image size before scaling (prior size)
+    const int full_height = height;
     // scale images
     if (problem.scale_size != 1) {
         for (int i = 0; i < num_images; ++i) {
@@ -608,6 +615,11 @@ void APD::InuputInitialization() {
         std::cout << "Scale images and cameras done\n";
     }
     std::cout << "Image size: " << width << " * " << height << std::endl;
+    // =================================================
+    // per-pixel depth prior (off by default)
+    if (params_host.prior_enable) {
+        LoadDepthPrior(full_width, full_height);
+    }
     // =================================================
     // read depth form geom consistency
     if (params_host.geom_consistency || params_host.use_APD) {
@@ -785,6 +797,11 @@ void APD::CudaSpaceInitialization() {
     cudaMalloc((void **) (&sa_mask_cuda), length * sizeof(uchar));
     cudaMemcpy(sa_mask_cuda, sa_mask_host.ptr<uchar>(0),
                length * sizeof(uchar), cudaMemcpyHostToDevice);
+    // per-pixel depth bounds (only when a prior was loaded)
+    if (!prior_bounds_host.empty()) {
+        cudaMalloc((void **) (&prior_bounds_cuda), length * sizeof(float2));
+        cudaMemcpy(prior_bounds_cuda, prior_bounds_host.ptr<float>(0), length * sizeof(float2), cudaMemcpyHostToDevice);
+    }
 
     if (params_host.use_APD) {
         // malloc memory for fit plane
@@ -830,6 +847,7 @@ void APD::SetDataPassHelperInCuda() {
     helper_host.weak_reliable_cuda = this->weak_reliable_cuda;
     helper_host.view_weight_cuda = this->view_weight_cuda;
     helper_host.weak_nearest_strong = this->weak_nearest_strong_cuda;
+    helper_host.prior_bounds_cuda = this->prior_bounds_cuda;
     cudaMalloc((void **) (&helper_cuda), sizeof(DataPassHelper));
     cudaMemcpy(helper_cuda, &helper_host, sizeof(DataPassHelper), cudaMemcpyHostToDevice);
 }
@@ -860,6 +878,146 @@ float APD::GetDepthMin() {
 
 float APD::GetDepthMax() {
     return params_host.depth_max;
+}
+
+bool APD::DepthInBounds(int r, int c, float depth) {
+    float lo = params_host.depth_min;                          // default: the view's search range
+    float hi = params_host.depth_max;
+    if (!prior_bounds_host.empty()) {
+        const cv::Vec2f b = prior_bounds_host.at<cv::Vec2f>(r, c);
+        if (b[1] > b[0]) {                                     // valid prior band replaces the view range
+            lo = b[0];
+            hi = b[1];
+        }
+    }
+    return !(depth < lo || depth > hi);                        // upstream's test: a NaN depth is not rejected here
+}
+
+// Reads a depth-prior BinMat without the memory cache (a cached input would be written back to disk by --flush):
+// checks the header, the type (CV_32FC1 / CV_32FC2), the size (must be expected_cols x expected_rows) and the file
+// length before reading the data, and the read itself.
+static bool ReadDepthPriorFile(const path &prior_path, int expected_cols, int expected_rows, cv::Mat &prior,
+                               std::string &problem_text) {
+    boost::filesystem::ifstream in(prior_path, std::ios_base::binary);      // wide path on Windows, as ReadBinMat
+    if (!in.is_open()) {
+        problem_text = "cannot be opened";
+        return false;
+    }
+    int header[4] = {0, 0, 0, 0};                              // version, rows, cols, OpenCV type
+    in.read(reinterpret_cast<char *>(header), sizeof(header));
+    if (in.gcount() != (std::streamsize) sizeof(header) || header[0] != 1) {
+        problem_text = "has no valid BinMat header";
+        return false;
+    }
+    const int rows = header[1], cols = header[2], type = header[3];
+    if (type != CV_32FC1 && type != CV_32FC2) {
+        problem_text = "has OpenCV type " + std::to_string(type) + " (expected CV_32FC1 depth or CV_32FC2 lo/hi)";
+        return false;
+    }
+    if (rows != expected_rows || cols != expected_cols) {      // also bounds the size arithmetic below
+        problem_text = "is " + std::to_string(cols) + "x" + std::to_string(rows) + ", the image is " +
+                       std::to_string(expected_cols) + "x" + std::to_string(expected_rows);
+        return false;
+    }
+    const uintmax_t data_bytes = (uintmax_t) rows * (uintmax_t) cols * (uintmax_t) CV_ELEM_SIZE(type);
+    boost::system::error_code size_error;
+    const uintmax_t bytes = file_size(prior_path, size_error);
+    if (size_error || bytes != sizeof(header) + data_bytes) {
+        problem_text = size_error ? "has no readable size" : "has " + std::to_string(bytes) +
+                       " bytes, the header needs " + std::to_string(sizeof(header) + data_bytes);
+        return false;
+    }
+    prior = cv::Mat(rows, cols, type);
+    in.read(reinterpret_cast<char *>(prior.data), (std::streamsize) data_bytes);
+    if (in.gcount() != (std::streamsize) data_bytes) {
+        problem_text = "could not be read completely";
+        prior.release();
+        return false;
+    }
+    return true;
+}
+
+void APD::LoadDepthPrior(int full_width, int full_height) {
+    // The prior is stored once at the reference image's own size (before APD's scaling): CV_32FC1 = prior depth
+    // (band from the prior.band_near / prior.band_far options) or CV_32FC2 = (lo, hi), camera-frame z in world units.
+    // 0 / non-finite / hi <= lo = no prior at that pixel.
+    path prior_path = problem.dense_folder / path("depth_prior") / path(ToFormatIndex(problem.ref_image_id) + ".bin");
+    if (!exists(prior_path)) {
+        std::cout << "WARNING Depth prior missing (view range used everywhere): " << prior_path << std::endl;
+        return;
+    }
+    cv::Mat prior;
+    std::string problem_text;
+    if (!ReadDepthPriorFile(prior_path, full_width, full_height, prior, problem_text)) {
+        std::cout << "WARNING Depth prior " << prior_path << ": " << problem_text << "; view range used everywhere"
+                  << std::endl;
+        return;
+    }
+    const int full_w = prior.cols;
+    const int full_h = prior.rows;
+    cv::Mat full(full_h, full_w, CV_32FC2, cv::Scalar(0.0f, 0.0f));     // (lo, hi) at full size
+    for (int r = 0; r < full_h; ++r) {
+        for (int c = 0; c < full_w; ++c) {
+            float lo = 0.0f, hi = 0.0f;
+            if (prior.type() == CV_32FC2) {
+                const cv::Vec2f v = prior.at<cv::Vec2f>(r, c);
+                lo = v[0];
+                hi = v[1];
+            } else {
+                const float d = prior.at<float>(r, c);
+                if (d > 0.0f) {
+                    lo = d - params_host.prior_band_near;
+                    hi = d + params_host.prior_band_far;
+                }
+            }
+            if (std::isfinite(lo) && std::isfinite(hi) && lo > 0.0f && hi > lo) {
+                full.at<cv::Vec2f>(r, c) = cv::Vec2f(lo, hi);
+            }
+        }
+    }
+    // Pool to the working size. APD scales K by s without a half-pixel shift, so working pixel x sits at full-size
+    // coordinate x / s and covers [(x - 0.5) / s, (x + 0.5) / s]; the full-size pixels whose centres fall inside that
+    // footprint are pooled (lo = min, hi = max over the valid ones), the nearest one when none does. At s = 1 every
+    // pixel keeps its own band. A working pixel without any valid full-size pixel stays invalid (view range).
+    prior_bounds_host = cv::Mat(height, width, CV_32FC2, cv::Scalar(0.0f, 0.0f));
+    const float sx = width / static_cast<float>(full_w);
+    const float sy = height / static_cast<float>(full_h);
+    auto footprint = [](int x, float s, int n, int &lo_idx, int &hi_idx) {
+        lo_idx = std::max(0, (int) std::ceil((x - 0.5f) / s));
+        hi_idx = std::min(n - 1, (int) std::floor((x + 0.5f) / s));
+        if (hi_idx < lo_idx) {                                   // upsampling: no centre inside, take the nearest
+            lo_idx = hi_idx = std::min(n - 1, std::max(0, (int) std::lround(x / s)));
+        }
+    };
+    int valid = 0;
+    for (int r = 0; r < height; ++r) {
+        int r0, r1;
+        footprint(r, sy, full_h, r0, r1);
+        for (int c = 0; c < width; ++c) {
+            int c0, c1;
+            footprint(c, sx, full_w, c0, c1);
+            float lo = FLT_MAX, hi = -FLT_MAX;
+            for (int rr = r0; rr <= r1; ++rr) {
+                for (int cc = c0; cc <= c1; ++cc) {
+                    const cv::Vec2f b = full.at<cv::Vec2f>(rr, cc);
+                    if (b[1] > b[0]) {
+                        lo = std::min(lo, b[0]);
+                        hi = std::max(hi, b[1]);
+                    }
+                }
+            }
+            if (hi > lo) {
+                prior_bounds_host.at<cv::Vec2f>(r, c) = cv::Vec2f(lo, hi);
+                valid++;
+            }
+        }
+    }
+    std::cout << "Depth prior: " << prior_path.filename().string() << " " << full_w << "x" << full_h << " -> "
+              << width << "x" << height << ", valid " << valid << " / " << width * height << std::endl;
+    if (valid == 0) {                                          // nothing usable: behave exactly as without a prior
+        std::cout << "WARNING Depth prior " << prior_path << " has no valid pixel; view range used everywhere" << std::endl;
+        prior_bounds_host.release();
+    }
 }
 
 void RescaleImageAndCamera(cv::Mat &src, cv::Mat &dst, cv::Mat &depth, Camera &camera) {

@@ -94,6 +94,7 @@ struct DataPassHelper {
     uchar *weak_reliable_cuda;
     uchar *view_weight_cuda;
     short2 *weak_nearest_strong;
+    float2 *prior_bounds_cuda;      // per-pixel depth search bounds (lo, hi); nullptr or hi <= lo = use the view range
 };
 
 class APD {
@@ -124,7 +125,17 @@ public:
 
     float GetDepthMax();
 
+    // true when depth lies inside the pixel's search bounds (per-pixel prior band if valid, else the view range)
+    bool DepthInBounds(int r, int c, float depth);
+
 private:
+    // reads <dense>/depth_prior/<ref>.bin (size full_width x full_height, the image before APD's scaling) and pools
+    // it to the current image size (prior.enable only)
+    void LoadDepthPrior(int full_width, int full_height);
+
+    cv::Mat prior_bounds_host;      // CV_32FC2 (lo, hi) at the working size; empty when the prior is off
+    float2 *prior_bounds_cuda = nullptr;
+
     void ExportFitNormal();
 
     void ExportAnchors();

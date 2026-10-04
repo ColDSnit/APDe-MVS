@@ -30,6 +30,41 @@ maps, and `patchmatch` when the depth maps must be recomputed.
   shared state in GPU scheduling order. Compare settings over repeated runs.
 - `views.*` options change the source-view lists and therefore also apply to `--only_fuse true`.
 
+## Per-pixel depth prior (`prior.*`)
+
+With `prior.enable = true`, APD reads `<dense>/depth_prior/<ref>.bin` for each reference view (`<ref>` is the
+view index with 8 digits, as for the images and cam files, e.g. `00000003.bin`):
+
+- Format: APD BinMat, i.e. four int32 values (version 1, rows, cols, OpenCV type) followed by the row-major
+  pixel data. Type `CV_32FC1` holds a prior depth, turned into the band
+  `[depth - prior.band_near, depth + prior.band_far]`; type `CV_32FC2` holds the band itself as `(lo, hi)`,
+  and the two band options are then unused. Any other type disables the prior for that view, with a warning.
+- Values are camera-frame z-depths (the quantity in `depths.bin`, not the distance along the ray) in the
+  world units of the cam files. They are absolute: `depth.range_scale_*` and `depth.range_pad` do not apply.
+- Size and pixel convention: the map must have the size of `<dense>/images/<ref>` (the undistorted scene
+  image, before APD's own scaling); any other size disables the prior for that view, with a warning. Pixel
+  (x, y) is the ray through image position (x, y) of the cam-file K (pixel centres at integer coordinates).
+- 0, a non-finite value, a non-positive `lo` or `hi <= lo` mean "no prior here": that pixel keeps the view's
+  depth range. A file with no valid pixel, a missing or unreadable file, or one whose length does not match
+  its header disables the prior for the view with a warning. The prior is read past APD's memory cache, so
+  `--flush` never writes it back.
+- With a 1-channel map, `prior.band_near + prior.band_far` must be > 0, otherwise no pixel has a band.
+- At each scale the map is pooled to the working size: a working pixel takes the minimum `lo` and maximum
+  `hi` of the full-size pixels whose centres lie in its footprint (at full size, its own band).
+- Inside the band APD draws its random initial depths, refinement candidates and perturbations, accepts
+  propagated planes, evaluates the weak/strong cost curve, runs the final local refinement, and finally
+  sets depths outside the band to 0. Side effects of a narrow band: the weak/strong cost curve sees only the
+  depths inside the band, so more pixels are classified STRONG; the median filter of STRONG pixels is not
+  confined to the band, so a filtered depth that leaves it becomes 0; when the inherited depth of a later
+  round lies outside the band (or is 0), the pixel is re-seeded randomly inside its band, and with a prior
+  loaded a pixel without a band is re-seeded inside the view range in the same way. The weak-pixel anchor
+  search and the `depth_*.jpg` debug images still use the view range.
+- Units: the `prior.band_*` defaults (0.0005) are 0.5 mm only when the world unit is the metre.
+- With a prior loaded, the depth perturbation is always clipped (`pm.perturbation_clip`): to the pixel's band,
+  or to the view range for a pixel without one.
+- `fusion.*` options apply to the default fusion (`RunFusion`); the Tanks and Temples fusion variants
+  (`--dataset TaT_a`/`TaT_i`) do not read them.
+
 ## Reference
 
 | Option | Type | Default | Range / choices | Unit | Stage | Description |
@@ -55,8 +90,8 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 | `fusion.view_min_angle_deg` | float | -1 | -1 .. 180 | deg | fusion | Skip source views whose optical axis is closer than this to the reference axis (<0: off) |
 | `fusion.view_max_angle_deg` | float | -1 | -1 .. 180 | deg | fusion | Skip source views whose optical axis is further than this from the reference axis (<0: off) |
 | `fusion.incident_max_deg` | float | -1 | -1 .. 180 | deg | fusion | A pixel takes part in fusion (as reference or source) only if the angle between its normal and the direction to its own camera is at most this (<0: off) |
-| `fusion.incident_sigma_deg` | float | -1 | -1 .. 180 | deg | fusion | Soft incident-angle prior exp(-k^2/2s^2) on every source term and on the reference score (<0: off; Schoenberger et al. 2016 use 45) |
-| `fusion.silhouette_trim_px` | int | 0 | 0 .. 100000 | px | fusion | Pixels within this many depth-map pixels of the view's silhouette edge (scene/sa_masks) take no part in fusion (0: off) |
+| `fusion.incident_sigma_deg` | float | -1 | -1 .. 180 | deg | fusion | Soft incident-angle prior exp(-k^2/2s^2) on every source term and on the reference score (<=0: off; Schoenberger et al. 2016 use 45) |
+| `fusion.silhouette_trim_px` | int | 0 | 0 .. 100000 | px | fusion | Pixels within this many depth-map pixels of the view's silhouette edge take no part in fusion (0: off). The silhouette is scene/sa_masks/<view>.bin read as an object mask (1-channel 8-bit, nonzero = object), as Recova's SAM step writes it; upstream run_SAM writes segment IDs there, whose union is not a silhouette |
 | `weakfilter.max_view_angle_deg` | float | 80 | 0 .. 180 | deg | fusion | Source views separated by more than this angle at the point are ignored |
 | `weakfilter.depth_mode` | enum | relative | relative, absolute |  | fusion | Occlusion margin type: relative or absolute |
 | `weakfilter.depth_rel` | float | 0.01 | 0 .. 1e+09 | ratio | fusion | Occlusion margin relative to the source depth |
@@ -101,6 +136,12 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 | `pm.local_refine_radius` | int | 5 | 0 .. 64 | steps | patchmatch | Search radius of the final refinement |
 | `pm.local_refine_margin` | float | 0.1 | 0 .. 2 | cost | patchmatch | Cost improvement needed to accept the refined depth |
 | `pm.rng_seed` | int | -1 | -1 .. 9e+18 |  | patchmatch | Random seed (<0: seed from the clock, runs are not repeatable) |
+| `pm.depth_perturbation_mode` | enum | relative | relative, range, absolute |  | patchmatch | Depth perturbation window: relative = +-depth_perturbation * depth (upstream; for a long-focal pinhole approximation of a telecentric lens the depth is metres, so the window is far wider than the object), range = +-depth_perturbation * width of the pixel's search range, absolute = +-depth_perturbation_abs; range and absolute are clipped to the search range |
+| `pm.depth_perturbation_abs` | float | 0 | 0 .. 1e+09 | world | patchmatch | Half-width of the absolute depth perturbation (depth_perturbation_mode = absolute; must then be > 0) |
+| `pm.perturbation_clip` | bool | false |  |  | patchmatch | Draw the perturbed depth inside the pixel's search range (upstream's retry loop never retries); always on for the range/absolute modes and with a depth prior |
+| `prior.enable` | bool | false |  |  | patchmatch | Read <dense>/depth_prior/<ref>.bin (BinMat at the image size; float z-depth or float2 lo/hi, 0 = none; see the depth-prior section of docs/RUNTIME_OPTIONS.md) and confine each pixel's random init, refinement, perturbation, propagation, weak/strong cost curve, final refinement and output filter to its band; pixels without a prior keep the view range. Prior depths are absolute (not scaled by depth.range_scale_* or padded by depth.range_pad) |
+| `prior.band_near` | float | 0.0005 | 0 .. 1e+09 | world | patchmatch | Band towards the camera around a 1-channel prior depth: lo = prior - this |
+| `prior.band_far` | float | 0.0005 | 0 .. 1e+09 | world | patchmatch | Band away from the camera around a 1-channel prior depth: hi = prior + this |
 | `viewsel.prior_selected` | float | 0.9 | 0 .. 1 |  | patchmatch | Prior of a view that a neighbouring pixel selected |
 | `viewsel.prior_unselected` | float | 0.1 | 0 .. 1 |  | patchmatch | Prior of a view that a neighbouring pixel did not select |
 | `viewsel.cost_thresh_init` | float | 0.8 | 0 .. 2 | cost | patchmatch | Good-cost threshold = init * exp(-iteration^2 / decay) |

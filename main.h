@@ -145,6 +145,15 @@ struct PatchMatchParams {
     int fit_ransac_iters = 50;             // RANSAC iterations of the per-iteration plane fit
     bool median_filter = true;             // run the checkerboard median depth filter on STRONG pixels
     long long rng_seed = -1;               // <0: seed from the clock (upstream); >=0: reproducible seed
+    // ---- depth perturbation and per-pixel depth prior (feat/per-pixel-depth-prior; defaults = upstream) ----
+    int depth_perturbation_mode = 0;       // 0 relative: +-depth_perturbation * depth (upstream); 1 range: +-depth_perturbation
+                                           // * width of the pixel's search range; 2 absolute: +-depth_perturbation_abs
+    float depth_perturbation_abs = 0.0f;   // half-width of the absolute perturbation (world units), mode 2 only
+    bool perturbation_clip = false;        // true: the perturbed depth is drawn inside the pixel's search range (the
+                                           // upstream retry loop uses && and never retries); implied by modes 1/2 and prior
+    bool prior_enable = false;             // true: read <dense>/depth_prior/<ref>.bin and search each pixel only inside its band
+    float prior_band_near = 0.0005f;       // 1-channel prior: band = [prior - near, prior + far] (world units)
+    float prior_band_far = 0.0005f;        //   "far" = away from the camera (deeper); 2-channel lo/hi maps ignore both
 };
 
 // Everything that can be changed at run time, gathered for the option registry (apd_config.cpp).
