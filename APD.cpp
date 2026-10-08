@@ -43,16 +43,18 @@ bool ReadBinMat(const path &mat_path, cv::Mat &mat) {
         return false;
     }
 
-    // zero-filled, so a file shorter than its header says leaves zeros (depth 0 = no depth) instead of
-    // uninitialised memory; a complete file overwrites every byte
-    mat = cv::Mat::zeros(rows, cols, type);
-    const std::streamsize expected = (std::streamsize) (mat.step * mat.rows);
-    in.read((char *) mat.data, expected);
+    // a fresh zero-filled matrix: a file shorter than its header says leaves zeros (depth 0 = no depth) instead of
+    // uninitialised memory, a complete file overwrites every byte, and a buffer the caller's mat shares with
+    // another Mat is never written (assigning Mat::zeros directly would reuse it when size and type match)
+    cv::Mat data = cv::Mat::zeros(rows, cols, type);         // new buffer (constructed, not assigned)
+    const std::streamsize expected = (std::streamsize) (data.step * data.rows);
+    in.read((char *) data.data, expected);
     if (in.gcount() != expected) {
         std::cout << "Error: " << mat_path << " is shorter than its header says; the missing part is zero"
                   << std::endl;
     }
     in.close();
+    mat = data;
     if (memory_cache != nullptr) {
         auto &mat_cache = memory_cache->mat_cache;
         if (mat_cache.find(mat_path.string()) == mat_cache.end()) {
@@ -1302,7 +1304,22 @@ static void LoadFusionViews(const path &dense_folder, const std::vector<Problem>
         const auto &problem = problems[i];
         std::cout << "Reading image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
         path image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + problem.img_ext);
-        views.imageIdToindexMap.emplace(problem.ref_image_id, i);
+        if (!views.imageIdToindexMap.emplace(problem.ref_image_id, i).second) {
+            // pair.txt lists this reference id again: fusion of this problem uses the first occurrence's slot (as
+            // upstream did), so its own slot stays empty instead of holding a second copy of the same maps
+            std::cout << "WARNING: image " << i << " repeats reference id " << problem.ref_image_id
+                      << "; it is fused from the maps of image " << views.imageIdToindexMap.at(problem.ref_image_id)
+                      << std::endl;
+            views.images.emplace_back();
+            views.cameras.emplace_back(Camera{});
+            views.depths.emplace_back();
+            views.normals.emplace_back();
+            views.masks.emplace_back();
+            views.weaks.emplace_back();
+            views.skip_weaks.emplace_back();
+            views.confidences.emplace_back();
+            continue;
+        }
         cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
         path cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
         Camera camera{};                                     // zeros if the file cannot be read
@@ -1487,7 +1504,9 @@ void RunFusion(
     // pixel as a reference, else 0. It applies fusion's own rules: trimmed (masks) and see-through (skip_weaks)
     // reference pixels, trimmed source pixels, sources outside the optical-axis angle window and unknown source ids
     // take no part; reprojection, depth (fusion.depth_mode), normal and incident-angle tests, the consistency score
-    // and min_consistent. Unlike fusion, no pixel is consumed, so the map is independent of the fusion order.
+    // and min_consistent. Unlike fusion, no pixel is consumed (with mask_used_pixels, pixels that fusion consumes
+    // keep their support), so the map is independent of the fusion order. A repeated reference id has one map,
+    // built from the source list of its first occurrence.
     std::vector<cv::Mat> support;
     long long occlusion_tested = 0, occlusion_rejected = 0;
     if (fp.occlusion_test) {

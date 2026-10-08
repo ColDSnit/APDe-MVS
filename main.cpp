@@ -378,7 +378,7 @@ int main(int argc, char **argv) {
     }
     std::cout << "There are " << problems.size() << " problems needed to be processed!" << std::endl;
     // the Tanks and Temples fusion variants keep their own hard-coded thresholds
-    if (!no_fuse && (dataset == "TaT_a" || dataset == "TaT_i")) {
+    if ((only_fuse || !no_fuse) && (dataset == "TaT_a" || dataset == "TaT_i")) {
         const char *groups[] = {"fusion", "weakfilter"};
         for (const char *group: groups) {
             const std::vector<std::string> changed = registry.ChangedOptions(group);
