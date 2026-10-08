@@ -165,18 +165,17 @@ void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems
                 std::cout << "WARNING: views.*_angle_deg: cam file of view " << problem.ref_image_id
                           << " cannot be read; all its sources are kept" << std::endl;
                 kept = problem.src_image_ids;
-            }
-            for (const int id: problem.src_image_ids) {
-                if (!ref_ok)
-                    break;
-                Camera src_camera;
-                if (!ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera)) {
-                    std::cout << "WARNING: views.*_angle_deg: cam file of view " << id << " cannot be read; it is "
-                              << "kept as a source of view " << problem.ref_image_id << std::endl;
-                    kept.push_back(id);
-                } else if (ViewAngleAllowed(ref_camera, src_camera, pipeline.view_min_angle_deg,
-                                            pipeline.view_max_angle_deg)) {
-                    kept.push_back(id);
+            } else {
+                for (const int id: problem.src_image_ids) {
+                    Camera src_camera;
+                    if (!ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera)) {
+                        std::cout << "WARNING: views.*_angle_deg: cam file of view " << id << " cannot be read; it "
+                                  << "is kept as a source of view " << problem.ref_image_id << std::endl;
+                        kept.push_back(id);
+                    } else if (ViewAngleAllowed(ref_camera, src_camera, pipeline.view_min_angle_deg,
+                                                pipeline.view_max_angle_deg)) {
+                        kept.push_back(id);
+                    }
                 }
             }
             problem.src_image_ids = kept;
