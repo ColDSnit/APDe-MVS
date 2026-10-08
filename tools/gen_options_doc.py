@@ -47,7 +47,8 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 - Fusion views: a view whose `depths.bin` is missing or not `CV_32FC1`, whose `normals.bin` is not `CV_32FC3`,
   whose normal, weak or confidence map differs in size from its depth map, or whose image or cam file cannot
   be read takes no part in fusion, with a warning; every other view keeps its place. A reference id that
-  `pair.txt` lists twice is fused twice from the maps of its first occurrence (as upstream), with a warning.
+  `pair.txt` lists twice is fused twice from the maps of its first occurrence (as upstream), with a warning;
+  the weak-pixel filter counts that view once (upstream counted it twice), so output can differ from upstream.
   A source id in `pair.txt` that is not a reference view of the run is skipped with a warning (upstream read
   it as the first view, so such a scene fuses differently from upstream even with default options).
 
