@@ -1206,6 +1206,12 @@ void WeakVisFilter(
         const WeakFilterParams &wf = WeakFilterParams()
 ) {
     const int num_images = cameras.size();
+    // confidence at (r, c) read with the map's stored type: APD writes CV_8UC1; CV_32FC1 is accepted as well
+    // (LoadFusionViews admits no other type). Upstream read the 8-bit map with at<float>, i.e. it compared
+    // reinterpreted bytes and read past the end of the matrix in its last rows.
+    const auto confidence_at = [](const cv::Mat &m, int r, int c) {
+        return m.type() == CV_32FC1 ? m.at<float>(r, c) : (float) m.at<uchar>(r, c);
+    };
     const auto task = [&](int ref_index) {
         if (depths[ref_index].empty())
             return;                                          // view without usable depth maps (no skip.png)
@@ -1249,13 +1255,8 @@ void WeakVisFilter(
                                     strong_occluded++;
                                 }
                             } else if (weaks[src_index].at<uchar>(src_r, src_c) == WEAK) {
-                                // Upstream reads the uchar confidence map as float; kept as the default so
-                                // results match, confidence_as_uchar=true compares the stored values instead.
-                                const bool src_less_confident = wf.confidence_as_uchar
-                                        ? (confidences[src_index].at<uchar>(src_r, src_c) <
-                                           confidences[ref_index].at<uchar>(r, c))
-                                        : (confidences[src_index].at<float>(src_r, src_c) <
-                                           confidences[ref_index].at<float>(r, c));
+                                const bool src_less_confident = confidence_at(confidences[src_index], src_r, src_c) <
+                                                                confidence_at(confidences[ref_index], r, c);
                                 if (src_less_confident) {
                                     if (proj_depth < src_depth - margin) {
                                         weak_occluded++;
@@ -1390,8 +1391,14 @@ static void LoadFusionViews(const path &dense_folder, const std::vector<Problem>
         } else if (weak.cols != depth.cols || weak.rows != depth.rows) {
             std::cout << "Error: weak size is not equal to depth size" << std::endl;
             usable = false;
+        } else if (weak.type() != CV_8UC1) {
+            std::cout << "Error: weak map is not CV_8UC1" << std::endl;
+            usable = false;
         } else if (confidence.cols != depth.cols || confidence.rows != depth.rows) {
             std::cout << "Error: confidence size is not equal to depth size" << std::endl;
+            usable = false;
+        } else if (confidence.type() != CV_8UC1 && confidence.type() != CV_32FC1) {
+            std::cout << "Error: confidence map is neither CV_8UC1 nor CV_32FC1" << std::endl;
             usable = false;
         } else if (image.empty()) {
             std::cout << "Error: cannot read " << image_path << std::endl;

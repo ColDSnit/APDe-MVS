@@ -62,7 +62,7 @@ struct WeakFilterParams {
     float depth_abs = 0.1f;                // occlusion margin in world units
     int strong_occluded_min = 2;           // STRONG source pixels behind the point needed to drop it
     int weak_occluded_min = 4;             // WEAK source pixels behind the point needed to drop it
-    bool confidence_as_uchar = false;      // false keeps the upstream read of the uchar map as float
+    bool confidence_as_uchar = false;      // deprecated, no effect: confidence maps are read with their stored type
 };
 
 // Options of the coarse-to-fine schedule in main.cpp and of scene loading.

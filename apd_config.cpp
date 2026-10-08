@@ -216,7 +216,8 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
     Add("weakfilter.weak_occluded_min", OPTION_INT, &w.weak_occluded_min, true, 1, MAX_IMAGES, FU, "views",
         "Number of lower-confidence WEAK source pixels lying behind a WEAK point that removes it");
     Add("weakfilter.confidence_as_uchar", OPTION_BOOL, &w.confidence_as_uchar, false, 0, 0, FU, "",
-        "Read the confidence map with its stored type (false keeps the upstream float read)");
+        "Deprecated, no effect (kept so that older config files still load): confidence maps are always read "
+        "with their stored type. Upstream read the 8-bit map as float, past the end of the matrix");
 
     // ---------------------------------------------------------------- depth range
     Add("depth.range_scale_min", OPTION_FLOAT, &p.range_scale_min, true, 0, BIG, PM, "ratio",
