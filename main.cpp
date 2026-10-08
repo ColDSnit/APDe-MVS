@@ -430,10 +430,11 @@ int main(int argc, char **argv) {
     ////////////////////////////////////////////////////////////////////////////////////////////////
     int round_num = ComputeRoundNum(problems, pipeline);
     std::cout << "Round nums: " << round_num << std::endl;
-    if (pipeline.geom_iterations == 0 && round_num > 1) {
-        // confidence.bin is written only by the geometric passes, and every scale after the first reads it
-        std::cout << "ERROR: pipeline.geom_iterations = 0 needs a single scale (pipeline.rounds = 1); with "
-                  << round_num << " scales the second one has no confidence map to read" << std::endl;
+    if (pipeline.geom_iterations == 0 && (round_num > 1 || !no_fuse)) {
+        // confidence.bin is written only by the geometric passes, and every later scale and the fusion read it
+        std::cout << "ERROR: pipeline.geom_iterations = 0 writes no confidence.bin; it is only valid with one "
+                  << "scale (pipeline.rounds = 1) and --no_fuse true (this run: " << round_num << " scale(s), "
+                  << (no_fuse ? "no fusion" : "fusion") << ")" << std::endl;
         return EXIT_FAILURE;
     }
     // init common problem params
