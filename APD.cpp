@@ -1,4 +1,5 @@
 #include "APD.h"
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 
@@ -1978,12 +1979,15 @@ void RunFusion_TAT_I(
                     continue;
                 const cv::Vec3f ref_normal = normals[ref_index].at<cv::Vec3f>(r, c);
                 float3 PointX = Get3DPointonWorld(c, r, ref_depth, cameras[ref_index]);
+                // values of this pixel only (upstream kept a source's values from an earlier pixel when the source
+                // was skipped here, so a stale match could still count)
+                std::fill(diff.begin(), diff.end(), CostData());
 
                 float3 consistent_Point = PointX;
                 for (int j = 0; j < num_ngb; ++j) {
                     int src_index = src_slots[i][j];
                     if (src_index < 0 || depths[src_index].empty())
-                        continue;                            // unknown or unusable source: diff[j] is never set
+                        continue;                            // unknown or unusable source: diff[j] stays unset
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
@@ -2127,11 +2131,14 @@ void RunFusion_TAT_A(
                 float consistent_Color[3] = {(float) images[ref_index].at<cv::Vec3b>(r, c)[0],
                                              (float) images[ref_index].at<cv::Vec3b>(r, c)[1],
                                              (float) images[ref_index].at<cv::Vec3b>(r, c)[2]};
+                // values of this pixel only (upstream kept a source's values from an earlier pixel when the source
+                // was skipped here, so a stale match could still count)
+                std::fill(diff.begin(), diff.end(), CostData());
 
                 for (int j = 0; j < num_ngb; ++j) {
                     int src_index = src_slots[i][j];
                     if (src_index < 0 || depths[src_index].empty())
-                        continue;                            // unknown or unusable source: diff[j] is never set
+                        continue;                            // unknown or unusable source: diff[j] stays unset
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
