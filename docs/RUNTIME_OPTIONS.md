@@ -35,7 +35,8 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 - Fusion views: a view whose `depths.bin` is missing or not `CV_32FC1`, whose `normals.bin` is not `CV_32FC3`,
   or whose normal, weak or confidence map differs in size from its depth map (or whose image cannot be read)
   takes no part in fusion, with a warning; every other view keeps its place. A source id in `pair.txt` that
-  is not a reference view of the run is skipped with a warning.
+  is not a reference view of the run is skipped with a warning (upstream read it as the first view, so such a
+  scene fuses differently from upstream even with default options).
 
 ## Behind-surface test (`fusion.occlusion_test`)
 
@@ -51,7 +52,8 @@ window, `fusion.view_*_angle_deg`) sees, at the pixel where the point projects, 
   distance along the ray);
 - does not agree with the point under fusion's own reprojection and depth tests for the pair (reference, k):
   `fusion.reproj_px` and `fusion.depth_mode` with its tolerance (`off`: reprojection only). Surfaces that fusion
-  would merge with the point therefore never count as in front of it, whatever the scene scale.
+  would merge with the point therefore never count as in front of it, whatever the scene scale. The agreement
+  is positional only: the normal and incident-angle tests are not applied to it.
 
 ## Per-pixel depth prior (`prior.*`)
 
