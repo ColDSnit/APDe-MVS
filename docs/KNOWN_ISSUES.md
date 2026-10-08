@@ -15,10 +15,13 @@ size mismatch, the "along its ray" wording, the silent TaT handling of `fusion.*
 
 ## PatchMatch stage with missing or corrupt files (upstream behaviour)
 
-- `APD::InuputInitialization` ignores the results of `ReadBinMat` and `ReadCamera`. A missing, truncated or
-  corrupt intermediate `depths.bin` / `normals.bin` / `weak.bin` / `confidence.bin` (a truncated one is now
-  rejected like a missing one) ends in an OpenCV assertion in `cv::resize`; an unreadable cam file is reported
-  but the view is still processed with an unset camera. The fusion stage handles both (the view is excluded).
+- `APD::InuputInitialization` ignores the results of `ReadBinMat` and `ReadCamera`. A missing or truncated
+  intermediate `depths.bin` / `normals.bin` / `weak.bin` / `confidence.bin`, or one with a bad header, ends in
+  an OpenCV assertion in `cv::resize` (a truncated file is now rejected like a missing one); a file with a valid
+  header of the right size but the wrong element type is not detected and is read as garbage. An unreadable
+  cam file is reported, but the view is still processed with an uninitialised or partly read camera. The
+  fusion stage excludes a view whose maps are missing, truncated or of another size, whose depth or normal
+  map has the wrong type, or whose cam file cannot be read.
 
 ## Tanks and Temples fusion (`--dataset TaT_a` / `TaT_i`)
 
