@@ -160,14 +160,19 @@ void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems
             const bool ref_ok = ReadCamera(cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt"),
                                            ref_camera);
             std::vector<int> kept;
+            if (!ref_ok) {
+                // no geometry to decide on: keep every source and say so once
+                std::cout << "WARNING: views.*_angle_deg: cam file of view " << problem.ref_image_id
+                          << " cannot be read; all its sources are kept" << std::endl;
+                kept = problem.src_image_ids;
+            }
             for (const int id: problem.src_image_ids) {
+                if (!ref_ok)
+                    break;
                 Camera src_camera;
-                const bool src_ok = ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera);
-                if (!ref_ok || !src_ok) {
-                    // no geometry to decide on: keep the source and say so
-                    std::cout << "WARNING: views.*_angle_deg: cam file of view " << (ref_ok ? id : problem.ref_image_id)
-                              << " cannot be read; source " << id << " of view " << problem.ref_image_id
-                              << " is kept" << std::endl;
+                if (!ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera)) {
+                    std::cout << "WARNING: views.*_angle_deg: cam file of view " << id << " cannot be read; it is "
+                              << "kept as a source of view " << problem.ref_image_id << std::endl;
                     kept.push_back(id);
                 } else if (ViewAngleAllowed(ref_camera, src_camera, pipeline.view_min_angle_deg,
                                             pipeline.view_max_angle_deg)) {

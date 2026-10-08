@@ -53,27 +53,40 @@ bool ReadBinMat(const path &mat_path, cv::Mat &mat) {
                   << ")" << std::endl;
         return false;
     }
-    // bytes the header announces, and bytes the file still holds after the header
-    const long long expected_bytes = (long long) rows * (long long) cols * (long long) CV_ELEM_SIZE(type);
+    // the data the header announces must all be in the file; a shorter file is rejected like a missing one, before
+    // anything is allocated (a corrupt header cannot trigger a huge allocation)
     const std::streampos data_start = in.tellg();
     in.seekg(0, std::ios_base::end);
-    const long long available_bytes = (long long) (in.tellg() - data_start);
+    const std::streampos data_end = in.tellg();
     in.seekg(data_start);
-    if (expected_bytes > available_bytes) {
-        std::cout << "Error: " << mat_path << " is shorter than its header says (" << available_bytes << " of "
-                  << expected_bytes << " data bytes); "
-                  << (available_bytes > 0 ? "the missing part is zero" : "not read") << std::endl;
-        if (available_bytes <= 0) {
-            in.close();
-            return false;                                    // header only: nothing to read, nothing to allocate
-        }
+    if (!in || data_start < 0 || data_end < data_start) {
+        in.close();
+        std::cout << "Error: cannot determine the size of " << mat_path << std::endl;
+        return false;
     }
+    const long long available_bytes = (long long) (data_end - data_start);
+    const long long elem_bytes = CV_ELEM_SIZE(type);
+    // rows * cols * elem_bytes <= available_bytes, tested by division so that no product can overflow
+    const bool fits = rows == 0 || cols == 0 ||
+                      (cols <= available_bytes / elem_bytes && rows <= available_bytes / (cols * elem_bytes));
+    if (!fits) {
+        in.close();
+        std::cout << "Error: " << mat_path << " is shorter than its header says (" << rows << " x " << cols
+                  << ", type " << type << ", " << available_bytes << " data bytes); not read" << std::endl;
+        return false;
+    }
+    const long long expected_bytes = (long long) rows * cols * elem_bytes;
 
-    // a fresh zero-filled matrix: a file shorter than its header says leaves zeros (depth 0 = no depth) instead of
-    // uninitialised memory, a complete file overwrites every byte, and a buffer the caller's mat shares with
-    // another Mat is never written (assigning Mat::zeros directly would reuse it when size and type match)
-    cv::Mat data = cv::Mat::zeros(rows, cols, type);         // new buffer (constructed, not assigned)
-    in.read((char *) data.data, (std::streamsize) std::min(expected_bytes, available_bytes));
+    // a freshly constructed matrix, so a buffer the caller's mat shares with another Mat is never written
+    cv::Mat data(rows, cols, type);
+    in.read((char *) data.data, (std::streamsize) expected_bytes);
+    const std::streamsize read_bytes = in.gcount();
+    if (read_bytes != (std::streamsize) expected_bytes) {
+        in.close();
+        std::cout << "Error: reading " << mat_path << " stopped after " << read_bytes << " of " << expected_bytes
+                  << " data bytes; not read" << std::endl;
+        return false;
+    }
     in.close();
     mat = data;
     if (memory_cache != nullptr) {
