@@ -577,7 +577,7 @@ static void StopOnInput(const std::string &problem_text, const path &file) {
 // another type.
 static void ReadRequiredBinMat(const path &mat_path, int type, cv::Mat &mat) {
     if (!ReadBinMat(mat_path, mat) || mat.empty()) {
-        StopOnInput("missing, truncated or empty map", mat_path);
+        StopOnInput("missing, unreadable, truncated or empty map", mat_path);
     }
     if (mat.type() != type) {
         StopOnInput("map of OpenCV type " + std::to_string(mat.type()) + " (expected " + std::to_string(type) + ")",
@@ -752,9 +752,13 @@ void APD::InuputInitialization() {
                 path sa_mask_path = sa_mask_folder / path(ToFormatIndex(problem.ref_image_id) + ".bin");
                 cv::Mat sa;
                 if (!ReadBinMat(sa_mask_path, sa) || sa.empty() || sa.type() != CV_8UC1) {
-                    // optional input (upstream also ran without it): this view runs without a sa mask
-                    std::cout << "WARNING: no usable sa mask " << sa_mask_path
-                              << " (missing, unreadable, empty or not CV_8UC1); none used for this view" << std::endl;
+                    // optional input (upstream also ran without it): this view runs without a sa mask; reported
+                    // once per view and scale, on the first pass of the scale that reads it
+                    if (params_host.state == REFINE_INIT) {
+                        std::cout << "WARNING: no usable sa mask " << sa_mask_path
+                                  << " (missing, unreadable, empty or not CV_8UC1); none used for this view"
+                                  << std::endl;
+                    }
                 } else {
                     sa_mask_host = sa;
                 }
