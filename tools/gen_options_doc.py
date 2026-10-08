@@ -45,12 +45,21 @@ maps, and `patchmatch` when the depth maps must be recomputed.
   fusion variants (`--dataset TaT_a` / `TaT_i`) keep their own hard-coded thresholds and do not read them;
   APD prints a warning for every such option that is set to a non-default value.
 - Fusion views: a view whose `depths.bin` is missing or not `CV_32FC1`, whose `normals.bin` is not `CV_32FC3`,
-  whose normal, weak or confidence map differs in size from its depth map, or whose image or cam file cannot
-  be read takes no part in fusion, with a warning; every other view keeps its place. A reference id that
-  `pair.txt` lists twice is fused twice from the maps of its first occurrence (as upstream), with a warning;
-  the weak-pixel filter counts that view once (upstream counted it twice), so output can differ from upstream.
+  whose `weak.bin` or `confidence.bin` is not `CV_8UC1`, whose normal, weak or confidence map differs in size
+  from its depth map, or whose image or cam file cannot be read takes no part in fusion, with a warning;
+  every other view keeps its place. A reference id that `pair.txt` lists twice is fused twice from the maps
+  of its first occurrence (as upstream), with a warning; the weak-pixel filter counts that view once
+  (upstream counted it twice), so output can differ from upstream.
   A source id in `pair.txt` that is not a reference view of the run is skipped with a warning (upstream read
   it as the first view, so such a scene fuses differently from upstream even with default options).
+- PatchMatch inputs: APD stops with an error naming the file when an image or cam file cannot be read, a
+  source image differs in size from the reference, or an intermediate map it needs (`depths.bin`, `normals.bin`,
+  `weak.bin`, `confidence.bin`) is missing, truncated, empty or of another type. A sa mask is optional: a
+  missing or empty one, or one that is not 1-channel 8-bit (`CV_8UC1`), gives a warning and that view runs
+  without it. With `views.*_angle_deg`, a source whose cam file cannot be read is dropped with a warning.
+- The weak-pixel filter reads the 8-bit confidence maps as stored. Upstream (and this fork up to 7f96e11) read
+  them as float, comparing reinterpreted bytes and reading past the end of the matrix in its last rows;
+  `weakfilter.confidence_as_uchar` is a no-op kept so that older config files still load.
 
 ## Behind-surface test (`fusion.occlusion_test`)
 
