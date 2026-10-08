@@ -1474,10 +1474,14 @@ void RunFusion(
         return expf(-k * k / incident_two_sigma2);
     };
 
+    const bool use_angle_window = (fp.view_min_angle_deg >= 0.0f || fp.view_max_angle_deg >= 0.0f);
+
     // ---- behind-surface test (fusion.occlusion_test): per-view support maps before fusion ----
-    // support[v](r, c) = number of pair-list sources of view v that pass the fusion consistency test (reprojection,
-    // depth, normal; the incident-angle limit when set) at that pixel. Unlike fusion, no pixel is consumed, so the
-    // map is independent of the fusion order.
+    // support[v](r, c) = number of agreeing sources of pixel (r, c) of view v when the fusion below would accept that
+    // pixel as a reference, else 0. It applies fusion's own rules: trimmed (masks) and see-through (skip_weaks)
+    // reference pixels, trimmed source pixels, sources outside the optical-axis angle window and unknown source ids
+    // take no part; reprojection, depth (fusion.depth_mode), normal and incident-angle tests, the consistency score
+    // and min_consistent. Unlike fusion, no pixel is consumed, so the map is independent of the fusion order.
     std::vector<cv::Mat> support;
     long long occlusion_tested = 0, occlusion_rejected = 0;
     if (fp.occlusion_test) {
@@ -1485,59 +1489,96 @@ void RunFusion(
         auto support_task = [&](int i) {
             const auto &problem = problems[i];
             const int v = imageIdToindexMap.at(problem.ref_image_id);
+            std::vector<int> srcs;                           // the sources fusion would use for this reference
+            for (const int u: src_slots[i]) {
+                if (u < 0)
+                    continue;                                // unknown source id
+                if (use_angle_window && !ViewAngleAllowed(cameras[v], cameras[u], fp.view_min_angle_deg,
+                                                          fp.view_max_angle_deg))
+                    continue;                                // outside the optical-axis angle window
+                srcs.push_back(u);
+            }
             cv::Mat s = cv::Mat::zeros(depths[v].rows, depths[v].cols, CV_8UC1);
             for (int r = 0; r < depths[v].rows; ++r) {
                 for (int c = 0; c < depths[v].cols; ++c) {
+                    if (masks[v].at<uchar>(r, c) == 1 || skip_weaks[v].at<uchar>(r, c) == 1)
+                        continue;                            // trimmed or see-through: never a fusion reference
                     const float d = depths[v].at<float>(r, c);
                     if (d <= 0.0f)
                         continue;
                     const cv::Vec3f n = normals[v].at<cv::Vec3f>(r, c);
                     const float3 X = Get3DPointonWorld(c, r, d, cameras[v]);
-                    if (use_incident_max && incident_cos(n, X, cameras[v]) < incident_cos_min)
-                        continue;
+                    float ref_prior = 1.0f;
+                    if (use_incident_max || use_incident_prior) {
+                        const float ref_cos = incident_cos(n, X, cameras[v]);
+                        if (use_incident_max && ref_cos < incident_cos_min)
+                            continue;
+                        if (use_incident_prior)
+                            ref_prior = incident_prior(ref_cos);
+                    }
                     int count = 0;
-                    for (const int u: src_slots[i]) {
-                        if (u < 0)
-                            continue;                        // unknown source id
+                    float consistency = 0.0f;
+                    for (const int u: srcs) {
                         float2 pt;
                         float pd;
                         ProjectCamera(X, cameras[u], pt, pd);
                         const int sr = int(pt.y + 0.5f), sc = int(pt.x + 0.5f);
                         if (sc < 0 || sc >= depths[u].cols || sr < 0 || sr >= depths[u].rows)
                             continue;
+                        if (masks[u].at<uchar>(sr, sc) == 1)
+                            continue;                        // trimmed source pixel
                         const float sd = depths[u].at<float>(sr, sc);
                         if (sd <= 0.0f)
                             continue;
                         const cv::Vec3f sn = normals[u].at<cv::Vec3f>(sr, sc);
                         const float3 Y = Get3DPointonWorld(sc, sr, sd, cameras[u]);
-                        if (use_incident_max && incident_cos(sn, Y, cameras[u]) < incident_cos_min)
-                            continue;
                         float2 back;
                         float bd;
                         ProjectCamera(Y, cameras[v], back, bd);
                         const float reproj = sqrt(pow(c - back.x, 2) + pow(r - back.y, 2));
-                        bool depth_ok = true;
+                        float src_prior = 1.0f;
+                        if (use_incident_max || use_incident_prior) {
+                            const float src_cos = incident_cos(sn, Y, cameras[u]);
+                            if (use_incident_max && src_cos < incident_cos_min)
+                                continue;
+                            if (use_incident_prior)
+                                src_prior = incident_prior(src_cos);
+                        }
+                        const float angle = fp.normal_test ? GetAngle(n, sn) : 0.0f;
+                        bool depth_ok = true;                // same test and score term as the fusion loop
+                        float depth_score = 0.0f;
                         if (fp.depth_mode == DEPTH_TEST_RELATIVE) {
-                            depth_ok = fabs(bd - d) / d < fp.depth_rel;
+                            const float rel = fabs(bd - d) / d;
+                            depth_ok = rel < fp.depth_rel;
+                            depth_score = fp.score_w_depth * rel;
                         } else if (fp.depth_mode == DEPTH_TEST_ABSOLUTE) {
-                            depth_ok = fabs(bd - d) < fp.depth_abs;
+                            const float abs_diff = fabs(bd - d);
+                            depth_ok = abs_diff < fp.depth_abs;
+                            depth_score = fp.score_w_depth_scaled * abs_diff / fp.depth_abs;
                         } else if (fp.depth_mode == DEPTH_TEST_PIXEL) {
                             float3 shifted = Get3DPointonWorld(c, r, bd, cameras[v]);
                             float2 sp;
                             float sdd;
                             ProjectCamera(shifted, cameras[u], sp, sdd);
-                            depth_ok = sqrt(pow(pt.x - sp.x, 2) + pow(pt.y - sp.y, 2)) < fp.depth_px;
+                            const float px_shift = sqrt(pow(pt.x - sp.x, 2) + pow(pt.y - sp.y, 2));
+                            depth_ok = px_shift < fp.depth_px;
+                            depth_score = fp.score_w_depth_scaled * px_shift / fp.depth_px;
                         }
-                        const float angle = fp.normal_test ? GetAngle(n, sn) : 0.0f;
-                        if (reproj < fp.reproj_px && depth_ok && angle < fp.normal_max_rad)
+                        if (reproj < fp.reproj_px && depth_ok && angle < fp.normal_max_rad) {
                             ++count;
+                            const float tmp_index = fp.score_w_reproj * reproj + depth_score + angle * fp.score_w_normal;
+                            consistency += exp(-tmp_index) * src_prior;
+                        }
                     }
-                    s.at<uchar>(r, c) = (uchar) std::min(count, 255);
+                    const float factor = (weaks[v].at<uchar>(r, c) == WEAK ? fp.score_thresh_weak
+                                                                           : fp.score_thresh_strong);
+                    if (count >= fp.min_consistent && ref_prior * consistency > factor * count)
+                        s.at<uchar>(r, c) = (uchar) std::min(count, 255);
                 }
             }
             support[v] = s;
         };
-        const int num_threads = MIN(std::thread::hardware_concurrency(), (unsigned) num_images);
+        const int num_threads = std::max(1, (int) std::min(std::thread::hardware_concurrency(), (unsigned) num_images));
         ThreadPool pool(num_threads);
         std::vector<std::future<void>> jobs;
         for (int i = 0; i < num_images; ++i) {
@@ -1548,11 +1589,18 @@ void RunFusion(
         }
         std::cout << "occlusion_test: support maps done" << std::endl;
     }
-    // True when another view sees a well-supported surface more than occlusion_tol in front of X along its ray, with
-    // both X's normal and the occluder's normal facing that view (cos >= occlusion_min_cos).
-    auto behind_surface = [&](const float3 &X, const cv::Vec3f &n, int ref_index) {
+    // True when another view k sees, at the pixel where X projects, an occluding surface:
+    // - k lies inside the reference's optical-axis angle window (view_allowed) and both X's normal and the
+    //   occluder's normal face k (cos >= occlusion_min_cos);
+    // - the occluder is supported: support >= occlusion_min_support (0 for trimmed and see-through pixels);
+    // - it lies in front of X by more than occlusion_tol, measured as z-depth in view k (pd - kd);
+    // - fusion's own reprojection and depth tests (fusion.reproj_px, fusion.depth_mode) for the pair
+    //   (reference, k) reject it, i.e. fusion would not treat it and X as one surface. This keeps pixel rounding
+    //   and depth noise on slanted surfaces from counting as "in front".
+    auto behind_surface = [&](const float3 &X, const cv::Vec3f &n, int ref_index, int r, int c, float ref_depth,
+                              const std::vector<char> &view_allowed) {
         for (int k = 0; k < num_images; ++k) {
-            if (k == ref_index || support[k].empty())
+            if (k == ref_index || support[k].empty() || !view_allowed[k])
                 continue;
             const Camera &cam = cameras[k];
             if (incident_cos(n, X, cam) < fp.occlusion_min_cos)
@@ -1566,13 +1614,32 @@ void RunFusion(
             if (kc < 0 || kc >= depths[k].cols || kr < 0 || kr >= depths[k].rows)
                 continue;
             const float kd = depths[k].at<float>(kr, kc);
-            if (kd <= 0.0f || kd >= pd - fp.occlusion_tol)
-                continue;                                     // nothing clearly in front along k's ray
+            if (kd <= 0.0f || pd - kd <= fp.occlusion_tol)
+                continue;                                     // nothing in front of X in view k
             if (support[k].at<uchar>(kr, kc) < fp.occlusion_min_support)
                 continue;                                     // the front surface is not better supported
+            const float3 Y = Get3DPointonWorld(kc, kr, kd, cam);
             const cv::Vec3f kn = normals[k].at<cv::Vec3f>(kr, kc);
-            if (incident_cos(kn, Get3DPointonWorld(kc, kr, kd, cam), cam) < fp.occlusion_min_cos)
+            if (incident_cos(kn, Y, cam) < fp.occlusion_min_cos)
                 continue;                                     // grazing occluder (limb flare): not trusted
+            float2 back;
+            float bd;
+            ProjectCamera(Y, cameras[ref_index], back, bd);
+            const float reproj = sqrt(pow(c - back.x, 2) + pow(r - back.y, 2));
+            bool depth_ok = true;                             // DEPTH_TEST_OFF: reprojection alone decides
+            if (fp.depth_mode == DEPTH_TEST_RELATIVE) {
+                depth_ok = fabs(bd - ref_depth) / ref_depth < fp.depth_rel;
+            } else if (fp.depth_mode == DEPTH_TEST_ABSOLUTE) {
+                depth_ok = fabs(bd - ref_depth) < fp.depth_abs;
+            } else if (fp.depth_mode == DEPTH_TEST_PIXEL) {
+                float3 shifted = Get3DPointonWorld(c, r, bd, cameras[ref_index]);
+                float2 sp;
+                float sdd;
+                ProjectCamera(shifted, cam, sp, sdd);
+                depth_ok = sqrt(pow(pt.x - sp.x, 2) + pow(pt.y - sp.y, 2)) < fp.depth_px;
+            }
+            if (reproj < fp.reproj_px && depth_ok)
+                continue;                                     // fusion would call it the same surface as X
             return true;
         }
         return false;
@@ -1580,7 +1647,6 @@ void RunFusion(
 
     std::vector<PointList> PointCloud;
     PointCloud.clear();
-    const bool use_angle_window = (fp.view_min_angle_deg >= 0.0f || fp.view_max_angle_deg >= 0.0f);
 
     for (int i = 0; i < num_images; ++i) {
         std::cout << "Fusing image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
@@ -1599,6 +1665,17 @@ void RunFusion(
             } else if (use_angle_window) {
                 src_allowed[j] = ViewAngleAllowed(cameras[ref_index], cameras[src_index], fp.view_min_angle_deg,
                                                   fp.view_max_angle_deg) ? 1 : 0;
+            }
+        }
+        // occlusion_test: views that may act as occluders of this reference (the same angle window, over all views)
+        std::vector<char> occluder_allowed;
+        if (fp.occlusion_test) {
+            occluder_allowed.assign(num_images, 1);
+            if (use_angle_window) {
+                for (int k = 0; k < num_images; ++k) {
+                    occluder_allowed[k] = ViewAngleAllowed(cameras[ref_index], cameras[k], fp.view_min_angle_deg,
+                                                           fp.view_max_angle_deg) ? 1 : 0;
+                }
             }
         }
         for (int r = 0; r < rows; ++r) {
@@ -1706,7 +1783,7 @@ void RunFusion(
                 if (num_consistent >= fp.min_consistent && (ref_prior * dynamic_consistency > factor * num_consistent)) {
                     if (fp.occlusion_test && num_consistent <= fp.occlusion_max_support) {
                         ++occlusion_tested;
-                        if (behind_surface(PointX, ref_normal, ref_index)) {
+                        if (behind_surface(PointX, ref_normal, ref_index, r, c, ref_depth, occluder_allowed)) {
                             ++occlusion_rejected;            // weakly supported point under a better-supported surface
                             continue;
                         }

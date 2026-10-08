@@ -48,7 +48,8 @@ struct FusionParams {
                                            // by another view are rejected (see the next four options)
     int occlusion_max_support = 1;         // only reference pixels with at most this many agreeing sources are tested
     int occlusion_min_support = 2;         // an occluding pixel needs at least this many agreeing sources of its own
-    float occlusion_tol = 1e-4f;           // world units along the occluding view's ray by which the surface must be in front
+    float occlusion_tol = 0.0f;            // extra minimum (world units, z-depth in the occluding view) by which the surface
+                                           // must be in front; it must also fail fusion's reprojection/depth agreement
     float occlusion_min_cos = 0.2f;        // a view counts only if the point's and the occluder's normals both face it
                                            // with at least this cosine (back sides and grazing limb pixels never count)
 };

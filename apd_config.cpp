@@ -187,14 +187,17 @@ OptionRegistry::OptionRegistry(RuntimeConfig &cfg) : config(cfg) {
         "Recova's SAM step writes it; upstream run_SAM writes segment IDs there, whose union is not a silhouette");
     Add("fusion.occlusion_test", OPTION_BOOL, &f.occlusion_test, false, 0, 0, FU, "",
         "Behind-surface test: reject a point with at most occlusion_max_support agreeing sources when another view "
-        "sees a surface more than occlusion_tol in front of it along its ray and that surface has at least "
-        "occlusion_min_support agreeing sources (removes 2-view layers lying under a multi-view surface)");
+        "sees, where the point projects, a surface in front of it that fusion's reprojection and depth tests "
+        "(fusion.reproj_px, fusion.depth_mode) do not match with the point and that has at least "
+        "occlusion_min_support agreeing sources (removes 2-view layers lying under a multi-view surface). Not read "
+        "by the Tanks and Temples fusion (--dataset TaT_a / TaT_i)");
     Add("fusion.occlusion_max_support", OPTION_INT, &f.occlusion_max_support, true, 0, MAX_IMAGES, FU, "views",
         "Reference pixels with at most this many agreeing sources are tested (1 = two-view points)");
     Add("fusion.occlusion_min_support", OPTION_INT, &f.occlusion_min_support, true, 1, MAX_IMAGES, FU, "views",
         "Agreeing sources an occluding pixel needs (2 = a surface seen consistently by at least three views)");
     Add("fusion.occlusion_tol", OPTION_FLOAT, &f.occlusion_tol, true, 0, BIG, FU, "world",
-        "Distance along the occluding view's ray by which its surface must lie in front of the point");
+        "Minimum by which the occluding surface must lie in front of the point, as z-depth in the occluding view "
+        "(not the distance along its ray); applied on top of the fusion agreement test (0: that test alone)");
     Add("fusion.occlusion_min_cos", OPTION_FLOAT, &f.occlusion_min_cos, true, -1, 1, FU, "",
         "A view takes part only if the point's normal and the occluding pixel's normal both face it with at least "
         "this cosine");
