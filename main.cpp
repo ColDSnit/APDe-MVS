@@ -405,6 +405,8 @@ int main(int argc, char **argv) {
                 continue;                                     // the weak filter does not run at all
             const std::vector<std::string> changed = registry.ChangedOptions(group);
             for (const std::string &name: changed) {
+                if (name == "weakfilter.confidence_as_uchar")
+                    continue;                                 // already reported as deprecated
                 std::cout << "WARNING: " << name << " is set but --dataset " << dataset
                           << " uses the Tanks and Temples fusion, which ignores it" << std::endl;
             }
@@ -433,7 +435,7 @@ int main(int argc, char **argv) {
     if (pipeline.geom_iterations == 0 && (round_num > 1 || !no_fuse)) {
         // confidence.bin is written only by the geometric passes, and every later scale and the fusion read it
         std::cout << "ERROR: pipeline.geom_iterations = 0 writes no confidence.bin; it is only valid with one "
-                  << "scale (pipeline.rounds = 1) and --no_fuse true (this run: " << round_num << " scale(s), "
+                  << "scale (e.g. pipeline.rounds = 1) and --no_fuse true (this run: " << round_num << " scale(s), "
                   << (no_fuse ? "no fusion" : "fusion") << ")" << std::endl;
         return EXIT_FAILURE;
     }

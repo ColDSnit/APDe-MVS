@@ -3,7 +3,7 @@
 Open points found while working on the fusion and PatchMatch input code.
 
 Items fixed on 2026-10-08 are described in the commits 2b89955..7f96e11 and 7713bbf, d2e67a8, c76644f,
-88fe833, 0c3c4f7.
+88fe833, 0c3c4f7, 36133f3.
 
 Reproducing pre-fix output: the weak-filter confidence fix can change default fusion output when the weak
 filter drops pixels (on the golden and mouse1 ctrl scenes it does not; see commit 7713bbf). Binaries with the

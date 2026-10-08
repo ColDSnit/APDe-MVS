@@ -62,7 +62,7 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 - The weak-pixel filter reads the 8-bit confidence maps as stored. Upstream (and this fork up to 7f96e11) read
   them as float, comparing reinterpreted bytes and reading past the end of the matrix in its last rows;
   `weakfilter.confidence_as_uchar` is a no-op kept so that older config files still load (APD warns when it
-  is set).
+  is set to true).
 - Tanks and Temples fusion: the per-source comparison values are reset at every pixel (upstream kept a skipped
   source's values from an earlier pixel), so `--dataset TaT_a` / `TaT_i` output differs from upstream.
 
