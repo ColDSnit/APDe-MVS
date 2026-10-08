@@ -45,16 +45,18 @@ maps, and `patchmatch` when the depth maps must be recomputed.
   fusion variants (`--dataset TaT_a` / `TaT_i`) keep their own hard-coded thresholds and do not read them;
   APD prints a warning for every such option that is set to a non-default value.
 - Fusion views: a view whose `depths.bin` is missing or not `CV_32FC1`, whose `normals.bin` is not `CV_32FC3`,
-  or whose normal, weak or confidence map differs in size from its depth map (or whose image cannot be read)
-  takes no part in fusion, with a warning; every other view keeps its place. A source id in `pair.txt` that
-  is not a reference view of the run is skipped with a warning (upstream read it as the first view, so such a
-  scene fuses differently from upstream even with default options).
+  whose normal, weak or confidence map differs in size from its depth map, or whose image or cam file cannot
+  be read takes no part in fusion, with a warning; every other view keeps its place. A reference id that
+  `pair.txt` lists twice is fused twice from the maps of its first occurrence (as upstream), with a warning.
+  A source id in `pair.txt` that is not a reference view of the run is skipped with a warning (upstream read
+  it as the first view, so such a scene fuses differently from upstream even with default options).
 
 ## Behind-surface test (`fusion.occlusion_test`)
 
 Off by default. Before fusion, APD computes for every view a support map: the number of agreeing sources of
 each pixel when fusion would accept that pixel as a reference (same masks, see-through pixels, angle window,
-tests, score and `fusion.min_consistent` as fusion; no pixel is consumed), else 0. During fusion, a point with
+tests, score and `fusion.min_consistent` as fusion), else 0. No pixel is consumed: with
+`fusion.mask_used_pixels`, a pixel that fusion consumes as a source keeps its support. During fusion, a point with
 at most `fusion.occlusion_max_support` agreeing sources is dropped when another view k (inside the angle
 window, `fusion.view_*_angle_deg`) sees, at the pixel where the point projects, a surface that
 
