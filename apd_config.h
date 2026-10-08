@@ -55,6 +55,9 @@ public:
     // Current values as an INI file that --config can read back.
     std::string ToIni() const;
 
+    // Names of the options of one group ("fusion", ...) whose current value differs from the default.
+    std::vector<std::string> ChangedOptions(const std::string &group) const;
+
 private:
     void Add(const std::string &name, OptionType type, void *target, bool has_range, double min_value,
              double max_value, const std::string &stage, const std::string &unit, const std::string &help,

@@ -522,6 +522,17 @@ bool OptionRegistry::Validate(std::string &error) const {
     return true;
 }
 
+std::vector<std::string> OptionRegistry::ChangedOptions(const std::string &group) const {
+    std::vector<std::string> names;
+    for (size_t i = 0; i < specs.size(); ++i) {
+        // default_text was captured at registration, so a differing text means the value was overridden
+        if (GroupOf(specs[i].name) == group && ValueText(specs[i]) != specs[i].default_text) {
+            names.push_back(specs[i].name);
+        }
+    }
+    return names;
+}
+
 std::string OptionRegistry::ToIni() const {
     std::string out = "# APD effective configuration; pass this file back with --config\n";
     std::string group;
