@@ -1,6 +1,7 @@
 #include "main.h"
 #include "APD.h"
 #include "apd_config.h"
+#include <algorithm>
 
 using namespace boost::filesystem;
 namespace opt = boost::program_options;
@@ -389,6 +390,13 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
     std::cout << "There are " << problems.size() << " problems needed to be processed!" << std::endl;
+    {
+        const std::vector<std::string> changed = registry.ChangedOptions("weakfilter");
+        if (std::find(changed.begin(), changed.end(), "weakfilter.confidence_as_uchar") != changed.end()) {
+            std::cout << "WARNING: weakfilter.confidence_as_uchar is deprecated and has no effect (confidence maps "
+                      << "are always read as stored)" << std::endl;
+        }
+    }
     // the Tanks and Temples fusion variants keep their own hard-coded thresholds
     if ((only_fuse || !no_fuse) && (dataset == "TaT_a" || dataset == "TaT_i")) {
         const char *groups[] = {"fusion", "weakfilter"};
@@ -422,6 +430,12 @@ int main(int argc, char **argv) {
     ////////////////////////////////////////////////////////////////////////////////////////////////
     int round_num = ComputeRoundNum(problems, pipeline);
     std::cout << "Round nums: " << round_num << std::endl;
+    if (pipeline.geom_iterations == 0 && round_num > 1) {
+        // confidence.bin is written only by the geometric passes, and every scale after the first reads it
+        std::cout << "ERROR: pipeline.geom_iterations = 0 needs a single scale (pipeline.rounds = 1); with "
+                  << round_num << " scales the second one has no confidence map to read" << std::endl;
+        return EXIT_FAILURE;
+    }
     // init common problem params
     for (auto &problem: problems) {
         problem.params = config.pm;  // start from the run-time options; the schedule below sets the rest

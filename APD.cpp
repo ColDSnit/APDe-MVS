@@ -754,7 +754,7 @@ void APD::InuputInitialization() {
                 if (!ReadBinMat(sa_mask_path, sa) || sa.empty() || sa.type() != CV_8UC1) {
                     // optional input (upstream also ran without it): this view runs without a sa mask
                     std::cout << "WARNING: no usable sa mask " << sa_mask_path
-                              << " (missing, empty or not CV_8UC1); none used for this view" << std::endl;
+                              << " (missing, unreadable, empty or not CV_8UC1); none used for this view" << std::endl;
                 } else {
                     sa_mask_host = sa;
                 }
