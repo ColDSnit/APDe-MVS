@@ -41,6 +41,29 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 - APD is not repeatable run to run, even with `pm.rng_seed` fixed, because the checkerboard kernels update
   shared state in GPU scheduling order. Compare settings over repeated runs.
 - `views.*` options change the source-view lists and therefore also apply to `--only_fuse true`.
+- `fusion.*` and `weakfilter.*` options apply to the default fusion (`RunFusion`). The Tanks and Temples
+  fusion variants (`--dataset TaT_a` / `TaT_i`) keep their own hard-coded thresholds and do not read them;
+  APD prints a warning for every such option that is set to a non-default value.
+- Fusion views: a view whose `depths.bin` is missing or not `CV_32FC1`, whose `normals.bin` is not `CV_32FC3`,
+  or whose normal, weak or confidence map differs in size from its depth map (or whose image cannot be read)
+  takes no part in fusion, with a warning; every other view keeps its place. A source id in `pair.txt` that
+  is not a reference view of the run is skipped with a warning.
+
+## Behind-surface test (`fusion.occlusion_test`)
+
+Off by default. Before fusion, APD computes for every view a support map: the number of agreeing sources of
+each pixel when fusion would accept that pixel as a reference (same masks, see-through pixels, angle window,
+tests, score and `fusion.min_consistent` as fusion; no pixel is consumed), else 0. During fusion, a point with
+at most `fusion.occlusion_max_support` agreeing sources is dropped when another view k (inside the angle
+window, `fusion.view_*_angle_deg`) sees, at the pixel where the point projects, a surface that
+
+- has a support of at least `fusion.occlusion_min_support` (trimmed and see-through pixels never qualify);
+- faces view k, as does the point (cosine at least `fusion.occlusion_min_cos`);
+- lies in front of the point by more than `fusion.occlusion_tol`, measured as z-depth in view k (not the
+  distance along the ray);
+- does not agree with the point under fusion's own reprojection and depth tests for the pair (reference, k):
+  `fusion.reproj_px` and `fusion.depth_mode` with its tolerance (`off`: reprojection only). Surfaces that fusion
+  would merge with the point therefore never count as in front of it, whatever the scene scale.
 
 ## Per-pixel depth prior (`prior.*`)
 
@@ -74,8 +97,6 @@ view index with 8 digits, as for the images and cam files, e.g. `00000003.bin`):
 - Units: the `prior.band_*` defaults (0.0005) are 0.5 mm only when the world unit is the metre.
 - With a prior loaded, the depth perturbation is always clipped (`pm.perturbation_clip`): to the pixel's band,
   or to the view range for a pixel without one.
-- `fusion.*` options apply to the default fusion (`RunFusion`); the Tanks and Temples fusion variants
-  (`--dataset TaT_a`/`TaT_i`) do not read them.
 
 ## Reference
 

@@ -29,6 +29,29 @@ maps, and `patchmatch` when the depth maps must be recomputed.
 - APD is not repeatable run to run, even with `pm.rng_seed` fixed, because the checkerboard kernels update
   shared state in GPU scheduling order. Compare settings over repeated runs.
 - `views.*` options change the source-view lists and therefore also apply to `--only_fuse true`.
+- `fusion.*` and `weakfilter.*` options apply to the default fusion (`RunFusion`). The Tanks and Temples
+  fusion variants (`--dataset TaT_a` / `TaT_i`) keep their own hard-coded thresholds and do not read them;
+  APD prints a warning for every such option that is set to a non-default value.
+- Fusion views: a view whose `depths.bin` is missing or not `CV_32FC1`, whose `normals.bin` is not `CV_32FC3`,
+  or whose normal, weak or confidence map differs in size from its depth map (or whose image cannot be read)
+  takes no part in fusion, with a warning; every other view keeps its place. A source id in `pair.txt` that
+  is not a reference view of the run is skipped with a warning.
+
+## Behind-surface test (`fusion.occlusion_test`)
+
+Off by default. Before fusion, APD computes for every view a support map: the number of agreeing sources of
+each pixel when fusion would accept that pixel as a reference (same masks, see-through pixels, angle window,
+tests, score and `fusion.min_consistent` as fusion; no pixel is consumed), else 0. During fusion, a point with
+at most `fusion.occlusion_max_support` agreeing sources is dropped when another view k (inside the angle
+window, `fusion.view_*_angle_deg`) sees, at the pixel where the point projects, a surface that
+
+- has a support of at least `fusion.occlusion_min_support` (trimmed and see-through pixels never qualify);
+- faces view k, as does the point (cosine at least `fusion.occlusion_min_cos`);
+- lies in front of the point by more than `fusion.occlusion_tol`, measured as z-depth in view k (not the
+  distance along the ray);
+- does not agree with the point under fusion's own reprojection and depth tests for the pair (reference, k):
+  `fusion.reproj_px` and `fusion.depth_mode` with its tolerance (`off`: reprojection only). Surfaces that fusion
+  would merge with the point therefore never count as in front of it, whatever the scene scale.
 
 ## Per-pixel depth prior (`prior.*`)
 
@@ -62,8 +85,6 @@ view index with 8 digits, as for the images and cam files, e.g. `00000003.bin`):
 - Units: the `prior.band_*` defaults (0.0005) are 0.5 mm only when the world unit is the metre.
 - With a prior loaded, the depth perturbation is always clipped (`pm.perturbation_clip`): to the pixel's band,
   or to the view range for a pixel without one.
-- `fusion.*` options apply to the default fusion (`RunFusion`); the Tanks and Temples fusion variants
-  (`--dataset TaT_a`/`TaT_i`) do not read them.
 
 ## Reference
 
@@ -92,10 +113,10 @@ view index with 8 digits, as for the images and cam files, e.g. `00000003.bin`):
 | `fusion.incident_max_deg` | float | -1 | -1 .. 180 | deg | fusion | A pixel takes part in fusion (as reference or source) only if the angle between its normal and the direction to its own camera is at most this (<0: off) |
 | `fusion.incident_sigma_deg` | float | -1 | -1 .. 180 | deg | fusion | Soft incident-angle prior exp(-k^2/2s^2) on every source term and on the reference score (<=0: off; Schoenberger et al. 2016 use 45) |
 | `fusion.silhouette_trim_px` | int | 0 | 0 .. 100000 | px | fusion | Pixels within this many depth-map pixels of the view's silhouette edge take no part in fusion (0: off). The silhouette is scene/sa_masks/<view>.bin read as an object mask (1-channel 8-bit, nonzero = object), as Recova's SAM step writes it; upstream run_SAM writes segment IDs there, whose union is not a silhouette |
-| `fusion.occlusion_test` | bool | false |  |  | fusion | Behind-surface test: reject a point with at most occlusion_max_support agreeing sources when another view sees a surface more than occlusion_tol in front of it along its ray and that surface has at least occlusion_min_support agreeing sources (removes 2-view layers lying under a multi-view surface) |
+| `fusion.occlusion_test` | bool | false |  |  | fusion | Behind-surface test: reject a point with at most occlusion_max_support agreeing sources when another view sees, where the point projects, a surface in front of it that fusion's reprojection and depth tests (fusion.reproj_px, fusion.depth_mode) do not match with the point and that has at least occlusion_min_support agreeing sources (removes 2-view layers lying under a multi-view surface). Not read by the Tanks and Temples fusion (--dataset TaT_a / TaT_i) |
 | `fusion.occlusion_max_support` | int | 1 | 0 .. 32 | views | fusion | Reference pixels with at most this many agreeing sources are tested (1 = two-view points) |
 | `fusion.occlusion_min_support` | int | 2 | 1 .. 32 | views | fusion | Agreeing sources an occluding pixel needs (2 = a surface seen consistently by at least three views) |
-| `fusion.occlusion_tol` | float | 0.0001 | 0 .. 1e+09 | world | fusion | Distance along the occluding view's ray by which its surface must lie in front of the point |
+| `fusion.occlusion_tol` | float | 0 | 0 .. 1e+09 | world | fusion | Minimum by which the occluding surface must lie in front of the point, as z-depth in the occluding view (not the distance along its ray); applied on top of the fusion agreement test (0: that test alone) |
 | `fusion.occlusion_min_cos` | float | 0.2 | -1 .. 1 |  | fusion | A view takes part only if the point's normal and the occluding pixel's normal both face it with at least this cosine |
 | `weakfilter.max_view_angle_deg` | float | 80 | 0 .. 180 | deg | fusion | Source views separated by more than this angle at the point are ignored |
 | `weakfilter.depth_mode` | enum | relative | relative, absolute |  | fusion | Occlusion margin type: relative or absolute |
