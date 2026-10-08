@@ -108,7 +108,7 @@ bool ReadCamera(const path &cam_path, Camera &cam) {
     }
 
     ifstream in(cam_path);
-    if (in.bad()) {
+    if (!in.is_open()) {                                     // missing or unreadable (bad() is not set by a failed open)
         return false;
     }
 
@@ -125,6 +125,9 @@ bool ReadCamera(const path &cam_path, Camera &cam) {
 
     for (int i = 0; i < 3; ++i) {
         in >> cam.K[3 * i + 0] >> cam.K[3 * i + 1] >> cam.K[3 * i + 2];
+    }
+    if (!in) {
+        return false;                                        // file ends before the intrinsics are complete
     }
     // compute camera center in world coord
     const auto &R = cam.R;
@@ -1178,8 +1181,8 @@ void WeakVisFilter(
                     for (int src_index = 0; src_index < num_images; ++src_index) {
                         const auto &ref_cam = cameras[ref_index];
                         const auto &src_cam = cameras[src_index];
-                        if (ref_index == src_index)
-                            continue;
+                        if (ref_index == src_index || depths[src_index].empty())
+                            continue;                        // itself, or a view without usable depth maps
                         cv::Vec3f a(ref_cam.c[0] - PointX.x, ref_cam.c[1] - PointX.y, ref_cam.c[2] - PointX.z);
                         cv::Vec3f b(src_cam.c[0] - PointX.x, src_cam.c[1] - PointX.y, src_cam.c[2] - PointX.z);
                         float angle = GetAngle(a, b);
@@ -1302,8 +1305,8 @@ static void LoadFusionViews(const path &dense_folder, const std::vector<Problem>
         views.imageIdToindexMap.emplace(problem.ref_image_id, i);
         cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
         path cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
-        Camera camera;
-        ReadCamera(cam_path, camera);
+        Camera camera{};                                     // zeros if the file cannot be read
+        const bool camera_ok = ReadCamera(cam_path, camera);
 
         path depth_path = problem.result_folder / path("depths.bin");
         path normal_path = problem.result_folder / path("normals.bin");
@@ -1316,7 +1319,10 @@ static void LoadFusionViews(const path &dense_folder, const std::vector<Problem>
         ReadBinMat(confidence_path, confidence);
         // check the size (and the element types the fusion reads with at<float> / at<cv::Vec3f>)
         bool usable = true;
-        if (depth.empty() || depth.type() != CV_32FC1) {
+        if (!camera_ok) {
+            std::cout << "Error: cannot read " << cam_path << std::endl;
+            usable = false;
+        } else if (depth.empty() || depth.type() != CV_32FC1) {
             std::cout << "Error: depth map missing or not CV_32FC1" << std::endl;
             usable = false;
         } else if (normal.cols != depth.cols || normal.rows != depth.rows) {
@@ -1431,7 +1437,7 @@ void RunFusion(
                           << std::endl;
                 continue;
             }
-            if (sa.type() != CV_8UC1) {                              // one-channel 8-bit object mask expected
+            if (sa.empty() || sa.type() != CV_8UC1) {                // non-empty one-channel 8-bit object mask expected
                 std::cout << "WARNING silhouette_trim_px: " << sa_path << " is not a 1-channel 8-bit mask (type "
                           << sa.type() << "), not trimmed" << std::endl;
                 continue;
@@ -1491,8 +1497,8 @@ void RunFusion(
             const int v = imageIdToindexMap.at(problem.ref_image_id);
             std::vector<int> srcs;                           // the sources fusion would use for this reference
             for (const int u: src_slots[i]) {
-                if (u < 0)
-                    continue;                                // unknown source id
+                if (u < 0 || depths[u].empty())
+                    continue;                                // unknown source id or view without usable depth maps
                 if (use_angle_window && !ViewAngleAllowed(cameras[v], cameras[u], fp.view_min_angle_deg,
                                                           fp.view_max_angle_deg))
                     continue;                                // outside the optical-axis angle window
@@ -1582,6 +1588,8 @@ void RunFusion(
         ThreadPool pool(num_threads);
         std::vector<std::future<void>> jobs;
         for (int i = 0; i < num_images; ++i) {
+            if (imageIdToindexMap.at(problems[i].ref_image_id) != i)
+                continue;                                    // duplicated reference id: its slot has a job already
             jobs.emplace_back(pool.enqueue(support_task, i));
         }
         for (auto &&job: jobs) {
@@ -1656,11 +1664,11 @@ void RunFusion(
         const int rows = depths[ref_index].rows;
         int num_ngb = problem.src_image_ids.size();
         // optional optical-axis angle window: decided once per (reference, source) pair
-        // (an unknown source id is never allowed)
+        // (an unknown source id or a view without usable depth maps is never allowed)
         std::vector<char> src_allowed(num_ngb, 1);
         for (int j = 0; j < num_ngb; ++j) {
             const int src_index = src_slots[i][j];
-            if (src_index < 0) {
+            if (src_index < 0 || depths[src_index].empty()) {
                 src_allowed[j] = 0;
             } else if (use_angle_window) {
                 src_allowed[j] = ViewAngleAllowed(cameras[ref_index], cameras[src_index], fp.view_min_angle_deg,
@@ -1673,6 +1681,10 @@ void RunFusion(
             occluder_allowed.assign(num_images, 1);
             if (use_angle_window) {
                 for (int k = 0; k < num_images; ++k) {
+                    if (depths[k].empty()) {
+                        occluder_allowed[k] = 0;             // view without usable depth maps
+                        continue;
+                    }
                     occluder_allowed[k] = ViewAngleAllowed(cameras[ref_index], cameras[k], fp.view_min_angle_deg,
                                                            fp.view_max_angle_deg) ? 1 : 0;
                 }
@@ -1905,8 +1917,8 @@ void RunFusion_TAT_I(
                 float3 consistent_Point = PointX;
                 for (int j = 0; j < num_ngb; ++j) {
                     int src_index = src_slots[i][j];
-                    if (src_index < 0)
-                        continue;                            // unknown source id: diff[j] keeps FLT_MAX
+                    if (src_index < 0 || depths[src_index].empty())
+                        continue;                            // unknown or unusable source: diff[j] is never set
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
@@ -2053,8 +2065,8 @@ void RunFusion_TAT_A(
 
                 for (int j = 0; j < num_ngb; ++j) {
                     int src_index = src_slots[i][j];
-                    if (src_index < 0)
-                        continue;                            // unknown source id: diff[j] keeps FLT_MAX
+                    if (src_index < 0 || depths[src_index].empty())
+                        continue;                            // unknown or unusable source: diff[j] is never set
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
