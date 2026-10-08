@@ -2,15 +2,15 @@
 
 Open points found while working on the fusion and PatchMatch input code.
 
-Items fixed on 2026-10-08 are described in the commits 2b89955..7f96e11 and 7713bbf, d2e67a8, c76644f,
-88fe833, 0c3c4f7, 36133f3.
+Items fixed on 2026-10-08 are described in the commits 2b89955..7f96e11 and in the commits after 7f96e11
+(7713bbf onwards).
 
 Reproducing pre-fix output: the weak-filter confidence fix can change default fusion output when the weak
-filter drops pixels (on the golden and mouse1 ctrl scenes it does not; see commit 7713bbf). Binaries with the
-old float read are kept on the lab workstation in `D:\Reconstruction\build\apde-mvs-custom-pre-master-80476d0`
-(80476d0, before all of these fixes) and `D:\Reconstruction\build\apde-mvs-custom-pre-confidence-7f96e11`
-(7f96e11, all fusion fixes except the confidence read, the TaT reset, the PatchMatch input checks and the
-later review fixes of 88fe833 and 0c3c4f7).
+filter drops pixels (on the golden and mouse1 ctrl scenes it does not; see commit 7713bbf, whose CV_32FC1
+allowance 88fe833 removed: only CV_8UC1 is accepted). Binaries with the old float read are kept on the Windows
+lab workstation in `D:/Reconstruction/build/apde-mvs-custom-pre-master-80476d0` (80476d0, before all of these
+fixes) and `D:/Reconstruction/build/apde-mvs-custom-pre-confidence-7f96e11` (7f96e11, without any of the
+commits after it).
 
 ## Tanks and Temples fusion (`--dataset TaT_a` / `TaT_i`)
 
