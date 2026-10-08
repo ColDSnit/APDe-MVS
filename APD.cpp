@@ -26,25 +26,32 @@ bool ReadBinMat(const path &mat_path, cv::Mat &mat) {
         }
     }
     ifstream in(mat_path, std::ios_base::binary);
-    if (in.bad()) {
+    if (!in.is_open()) {                                     // missing or unreadable (bad() is not set by a failed open)
         std::cout << "Error opening file: " << mat_path << std::endl;
         return false;
     }
 
-    int version, rows, cols, type;
+    int version = 0, rows = 0, cols = 0, type = 0;           // defined values when the header is short
     in.read((char *) (&version), sizeof(int));
     in.read((char *) (&rows), sizeof(int));
     in.read((char *) (&cols), sizeof(int));
     in.read((char *) (&type), sizeof(int));
 
-    if (version != 1) {
+    if (!in || version != 1 || rows < 0 || cols < 0) {
         in.close();
         std::cout << "Version error: " << mat_path << std::endl;
         return false;
     }
 
-    mat = cv::Mat(rows, cols, type);
-    in.read((char *) mat.data, sizeof(char) * mat.step * mat.rows);
+    // zero-filled, so a file shorter than its header says leaves zeros (depth 0 = no depth) instead of
+    // uninitialised memory; a complete file overwrites every byte
+    mat = cv::Mat::zeros(rows, cols, type);
+    const std::streamsize expected = (std::streamsize) (mat.step * mat.rows);
+    in.read((char *) mat.data, expected);
+    if (in.gcount() != expected) {
+        std::cout << "Error: " << mat_path << " is shorter than its header says; the missing part is zero"
+                  << std::endl;
+    }
     in.close();
     if (memory_cache != nullptr) {
         auto &mat_cache = memory_cache->mat_cache;
