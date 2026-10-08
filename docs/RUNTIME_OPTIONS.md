@@ -44,10 +44,9 @@ maps, and `patchmatch` when the depth maps must be recomputed.
   source image differs in size from the reference, or an intermediate map it needs (`depths.bin`,
   `normals.bin`, `weak.bin`, `confidence.bin`) is missing, truncated, empty or of another type. A sa mask is
   optional: a missing, unreadable or empty one, or one that is not 1-channel 8-bit (`CV_8UC1`), gives a
-  warning and that view runs without it. `pipeline.geom_iterations = 0` is refused with more than one scale
-  (the later scales need the `confidence.bin` that only the geometric passes write). With `views.*_angle_deg`,
-  a source whose cam file cannot be read is dropped with a warning.
-
+  warning and that view runs without it. `pipeline.geom_iterations = 0` is refused unless the run has one scale
+  and `--no_fuse true` (the later scales and the fusion need the `confidence.bin` that only the geometric
+  passes write). With `views.*_angle_deg`, a source whose cam file cannot be read is dropped with a warning.
 - The weak-pixel filter reads the 8-bit confidence maps as stored. Upstream (and this fork up to 7f96e11) read
   them as float, comparing reinterpreted bytes and reading past the end of the matrix in its last rows;
   `weakfilter.confidence_as_uchar` is a no-op kept so that older config files still load (APD warns when it
