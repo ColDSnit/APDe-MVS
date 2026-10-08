@@ -1164,6 +1164,8 @@ void WeakVisFilter(
 ) {
     const int num_images = cameras.size();
     const auto task = [&](int ref_index) {
+        if (depths[ref_index].empty())
+            return;                                          // view without usable depth maps (no skip.png)
         const int width = depths[ref_index].cols;
         const int height = depths[ref_index].rows;
         for (int r = 0; r < height; ++r) {
@@ -1272,49 +1274,32 @@ bool ViewAngleAllowed(const Camera &ref, const Camera &src, float min_deg, float
     return true;
 }
 
-void RunFusion(
-    const path &dense_folder,
-    const std::vector<Problem> &problems,
-    const std::string &name,
-    bool weak_filter,
-    bool export_color,
-    const FusionParams &fp,
-    const WeakFilterParams &wf
-) {
-    int num_images = problems.size();
-    path image_folder = dense_folder / path("images");
-    path cam_folder = dense_folder / path("cams");
-
-    // to avoid out of memory, we release the gray image cache!
-    if (memory_cache != nullptr) {
-        memory_cache->img_cache.clear();
-    }
-
+// Per-view inputs of the three fusion variants, in problem order: slot i always belongs to problems[i], and
+// imageIdToindexMap maps each reference id to its slot. A view whose result files are missing, of the wrong type
+// or of inconsistent sizes keeps its slot with empty matrices (depth 0 x 0), so it takes part in nothing but every
+// index stays in range. Upstream skipped such a view after mapping its id, which shortened the vectors and shifted
+// every later view by one slot.
+struct FusionViews {
     std::vector<cv::Mat> images;
     std::vector<Camera> cameras;
     std::vector<cv::Mat> depths;
     std::vector<cv::Mat> normals;
     std::vector<cv::Mat> masks;
-    std::vector<cv::Mat> blocks;
     std::vector<cv::Mat> weaks;
     std::vector<cv::Mat> confidences;
     std::vector<cv::Mat> skip_weaks;
-    images.clear();
-    cameras.clear();
-    depths.clear();
-    normals.clear();
-    masks.clear();
-    blocks.clear();
-    weaks.clear();
-    skip_weaks.clear();
-    confidences.clear();
     std::unordered_map<int, int> imageIdToindexMap;
+};
 
+static void LoadFusionViews(const path &dense_folder, const std::vector<Problem> &problems, FusionViews &views) {
+    const int num_images = static_cast<int>(problems.size());
+    const path image_folder = dense_folder / path("images");
+    const path cam_folder = dense_folder / path("cams");
     for (int i = 0; i < num_images; ++i) {
         const auto &problem = problems[i];
         std::cout << "Reading image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
         path image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + problem.img_ext);
-        imageIdToindexMap.emplace(problem.ref_image_id, i);
+        views.imageIdToindexMap.emplace(problem.ref_image_id, i);
         cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
         path cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
         Camera camera;
@@ -1329,32 +1314,104 @@ void RunFusion(
         ReadBinMat(normal_path, normal);
         ReadBinMat(weak_path, weak);
         ReadBinMat(confidence_path, confidence);
-        // check the size
-        if (normal.cols != depth.cols || normal.rows != depth.rows) {
+        // check the size (and the element types the fusion reads with at<float> / at<cv::Vec3f>)
+        bool usable = true;
+        if (depth.empty() || depth.type() != CV_32FC1) {
+            std::cout << "Error: depth map missing or not CV_32FC1" << std::endl;
+            usable = false;
+        } else if (normal.cols != depth.cols || normal.rows != depth.rows) {
             std::cout << "Error: normal size is not equal to depth size" << std::endl;
-            continue;
-        }
-        if (weak.cols != depth.cols || weak.rows != depth.rows) {
+            usable = false;
+        } else if (normal.type() != CV_32FC3) {
+            std::cout << "Error: normal map is not CV_32FC3" << std::endl;
+            usable = false;
+        } else if (weak.cols != depth.cols || weak.rows != depth.rows) {
             std::cout << "Error: weak size is not equal to depth size" << std::endl;
-            continue;
-        }
-        if (confidence.cols != depth.cols || confidence.rows != depth.rows) {
+            usable = false;
+        } else if (confidence.cols != depth.cols || confidence.rows != depth.rows) {
             std::cout << "Error: confidence size is not equal to depth size" << std::endl;
+            usable = false;
+        } else if (image.empty()) {
+            std::cout << "Error: cannot read " << image_path << std::endl;
+            usable = false;
+        }
+        if (!usable) {
+            std::cout << "WARNING: image " << i << " (id " << problem.ref_image_id << ") takes no part in fusion"
+                      << std::endl;
+            views.images.emplace_back();
+            views.cameras.emplace_back(camera);              // never used for a pixel: its depth map is 0 x 0
+            views.depths.emplace_back();
+            views.normals.emplace_back();
+            views.masks.emplace_back();
+            views.weaks.emplace_back();
+            views.skip_weaks.emplace_back();
+            views.confidences.emplace_back();
             continue;
         }
         cv::Mat scaled_image;
         RescaleImageAndCamera(image, scaled_image, depth, camera);
-        images.emplace_back(scaled_image);
-        cameras.emplace_back(camera);
-        depths.emplace_back(depth);
-        normals.emplace_back(normal);
+        views.images.emplace_back(scaled_image);
+        views.cameras.emplace_back(camera);
+        views.depths.emplace_back(depth);
+        views.normals.emplace_back(normal);
         cv::Mat mask = cv::Mat::zeros(depth.rows, depth.cols, CV_8UC1);
-        masks.emplace_back(mask);
-        weaks.emplace_back(weak);
+        views.masks.emplace_back(mask);
+        views.weaks.emplace_back(weak);
         cv::Mat skip_weak = cv::Mat::zeros(depth.rows, depth.cols, CV_8UC1);
-        skip_weaks.emplace_back(skip_weak);
-        confidences.emplace_back(confidence);
+        views.skip_weaks.emplace_back(skip_weak);
+        views.confidences.emplace_back(confidence);
     }
+}
+
+// Slot of every source view of every problem (-1 for an id that is not a reference view of this run, with a
+// warning). Upstream looked ids up with operator[], which silently mapped an unknown id to slot 0 (and may insert,
+// so it must not be called from worker threads).
+static std::vector<std::vector<int>> SourceSlots(const std::vector<Problem> &problems,
+                                                 const std::unordered_map<int, int> &imageIdToindexMap) {
+    std::vector<std::vector<int>> slots(problems.size());
+    for (size_t i = 0; i < problems.size(); ++i) {
+        for (const int src_id: problems[i].src_image_ids) {
+            const auto it = imageIdToindexMap.find(src_id);
+            if (it == imageIdToindexMap.end()) {
+                std::cout << "WARNING: source id " << src_id << " of image " << i << " (id "
+                          << problems[i].ref_image_id << ") is not a reference view of this run; skipped" << std::endl;
+                slots[i].push_back(-1);
+            } else {
+                slots[i].push_back(it->second);
+            }
+        }
+    }
+    return slots;
+}
+
+void RunFusion(
+    const path &dense_folder,
+    const std::vector<Problem> &problems,
+    const std::string &name,
+    bool weak_filter,
+    bool export_color,
+    const FusionParams &fp,
+    const WeakFilterParams &wf
+) {
+    int num_images = problems.size();
+
+    // to avoid out of memory, we release the gray image cache!
+    if (memory_cache != nullptr) {
+        memory_cache->img_cache.clear();
+    }
+
+    FusionViews views;
+    LoadFusionViews(dense_folder, problems, views);
+    std::vector<cv::Mat> &images = views.images;
+    std::vector<Camera> &cameras = views.cameras;
+    std::vector<cv::Mat> &depths = views.depths;
+    std::vector<cv::Mat> &normals = views.normals;
+    std::vector<cv::Mat> &masks = views.masks;
+    std::vector<cv::Mat> &weaks = views.weaks;
+    std::vector<cv::Mat> &confidences = views.confidences;
+    std::vector<cv::Mat> &skip_weaks = views.skip_weaks;
+    const std::unordered_map<int, int> &imageIdToindexMap = views.imageIdToindexMap;
+    const std::vector<std::vector<int>> src_slots = SourceSlots(problems, imageIdToindexMap);
 
     if (weak_filter) {
         WeakVisFilter(problems, cameras, depths, weaks, confidences, dense_folder, skip_weaks, wf);
@@ -1364,7 +1421,9 @@ void RunFusion(
     // silhouette edge are marked as used, so they are neither references nor sources.
     if (fp.silhouette_trim_px > 0) {
         for (int i = 0; i < num_images; ++i) {
-            const int idx = imageIdToindexMap[problems[i].ref_image_id];
+            const int idx = imageIdToindexMap.at(problems[i].ref_image_id);
+            if (depths[idx].empty())
+                continue;                                            // view without usable depth maps
             path sa_path = dense_folder / path("sa_masks") / path(ToFormatIndex(problems[i].ref_image_id) + ".bin");
             cv::Mat sa;
             if (!exists(sa_path) || !ReadBinMat(sa_path, sa)) {
@@ -1425,7 +1484,7 @@ void RunFusion(
         support.assign(num_images, cv::Mat());
         auto support_task = [&](int i) {
             const auto &problem = problems[i];
-            const int v = imageIdToindexMap[problem.ref_image_id];
+            const int v = imageIdToindexMap.at(problem.ref_image_id);
             cv::Mat s = cv::Mat::zeros(depths[v].rows, depths[v].cols, CV_8UC1);
             for (int r = 0; r < depths[v].rows; ++r) {
                 for (int c = 0; c < depths[v].cols; ++c) {
@@ -1437,8 +1496,9 @@ void RunFusion(
                     if (use_incident_max && incident_cos(n, X, cameras[v]) < incident_cos_min)
                         continue;
                     int count = 0;
-                    for (const int src_id: problem.src_image_ids) {
-                        const int u = imageIdToindexMap[src_id];
+                    for (const int u: src_slots[i]) {
+                        if (u < 0)
+                            continue;                        // unknown source id
                         float2 pt;
                         float pd;
                         ProjectCamera(X, cameras[u], pt, pd);
@@ -1525,15 +1585,18 @@ void RunFusion(
     for (int i = 0; i < num_images; ++i) {
         std::cout << "Fusing image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
         const auto &problem = problems[i];
-        int ref_index = imageIdToindexMap[problem.ref_image_id];
+        int ref_index = imageIdToindexMap.at(problem.ref_image_id);
         const int cols = depths[ref_index].cols;
         const int rows = depths[ref_index].rows;
         int num_ngb = problem.src_image_ids.size();
         // optional optical-axis angle window: decided once per (reference, source) pair
+        // (an unknown source id is never allowed)
         std::vector<char> src_allowed(num_ngb, 1);
-        if (use_angle_window) {
-            for (int j = 0; j < num_ngb; ++j) {
-                int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+        for (int j = 0; j < num_ngb; ++j) {
+            const int src_index = src_slots[i][j];
+            if (src_index < 0) {
+                src_allowed[j] = 0;
+            } else if (use_angle_window) {
                 src_allowed[j] = ViewAngleAllowed(cameras[ref_index], cameras[src_index], fp.view_min_angle_deg,
                                                   fp.view_max_angle_deg) ? 1 : 0;
             }
@@ -1568,7 +1631,7 @@ void RunFusion(
                 for (int j = 0; j < num_ngb; ++j) {
                     if (!src_allowed[j])
                         continue;
-                    int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+                    int src_index = src_slots[i][j];
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
@@ -1661,7 +1724,7 @@ void RunFusion(
                     for (int j = 0; j < num_ngb; ++j) {
                         if (used_list[j].x == -1)
                             continue;
-                        int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+                        int src_index = src_slots[i][j];      // used_list is only set for known sources
                         if (fp.mask_used_pixels) {
                             masks[src_index].at<uchar>(used_list[j].y, used_list[j].x) = 1;
                         }
@@ -1696,8 +1759,6 @@ void RunFusion_TAT_I(
     bool export_color
 ) {
     int num_images = problems.size();
-    path image_folder = dense_folder / path("images");
-    path cam_folder = dense_folder / path("cams");
     const float dist_base = 0.25f;
     const float depth_base = 1.0f / 3500.0f;
 
@@ -1709,72 +1770,18 @@ void RunFusion_TAT_I(
         memory_cache->img_cache.clear();
     }
 
-    std::vector<cv::Mat> images;
-    std::vector<Camera> cameras;
-    std::vector<cv::Mat> depths;
-    std::vector<cv::Mat> normals;
-    std::vector<cv::Mat> masks;
-    std::vector<cv::Mat> weaks;
-    std::vector<cv::Mat> confidences;
-    std::vector<cv::Mat> skip_weaks;
-    images.clear();
-    cameras.clear();
-    depths.clear();
-    normals.clear();
-    masks.clear();
-    weaks.clear();
-    confidences.clear();
-    skip_weaks.clear();
-
-    std::unordered_map<int, int> imageIdToindexMap;
-
-    for (int i = 0; i < num_images; ++i) {
-        const auto &problem = problems[i];
-        std::cout << "Reading image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
-        path image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + problem.img_ext);
-        imageIdToindexMap.emplace(problem.ref_image_id, i);
-        cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
-        path cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
-        Camera camera;
-        ReadCamera(cam_path, camera);
-
-        path depth_path = problem.result_folder / path("depths.bin");
-        path normal_path = problem.result_folder / path("normals.bin");
-        path weak_path = problem.result_folder / path("weak.bin");
-        path confidence_path = problem.result_folder / path("confidence.bin");
-        cv::Mat depth, normal, weak, confidence;
-        ReadBinMat(depth_path, depth);
-        ReadBinMat(normal_path, normal);
-        ReadBinMat(weak_path, weak);
-        ReadBinMat(confidence_path, confidence);
-
-        // check the size
-        if (normal.cols != depth.cols || normal.rows != depth.rows) {
-            std::cout << "Error: normal size is not equal to depth size" << std::endl;
-            continue;
-        }
-        if (weak.cols != depth.cols || weak.rows != depth.rows) {
-            std::cout << "Error: weak size is not equal to depth size" << std::endl;
-            continue;
-        }
-        if (confidence.cols != depth.cols || confidence.rows != depth.rows) {
-            std::cout << "Error: confidence size is not equal to depth size" << std::endl;
-            continue;
-        }
-
-        cv::Mat scaled_image;
-        RescaleImageAndCamera(image, scaled_image, depth, camera);
-        images.emplace_back(scaled_image);
-        cameras.emplace_back(camera);
-        depths.emplace_back(depth);
-        normals.emplace_back(normal);
-        cv::Mat mask = cv::Mat::zeros(depth.rows, depth.cols, CV_8UC1);
-        masks.emplace_back(mask);
-        weaks.emplace_back(weak);
-        cv::Mat skip_weak = cv::Mat::zeros(depth.rows, depth.cols, CV_8UC1);
-        skip_weaks.emplace_back(skip_weak);
-        confidences.emplace_back(confidence);
-    }
+    FusionViews views;
+    LoadFusionViews(dense_folder, problems, views);
+    std::vector<cv::Mat> &images = views.images;
+    std::vector<Camera> &cameras = views.cameras;
+    std::vector<cv::Mat> &depths = views.depths;
+    std::vector<cv::Mat> &normals = views.normals;
+    std::vector<cv::Mat> &masks = views.masks;
+    std::vector<cv::Mat> &weaks = views.weaks;
+    std::vector<cv::Mat> &confidences = views.confidences;
+    std::vector<cv::Mat> &skip_weaks = views.skip_weaks;
+    const std::unordered_map<int, int> &imageIdToindexMap = views.imageIdToindexMap;
+    const std::vector<std::vector<int>> src_slots = SourceSlots(problems, imageIdToindexMap);
 
     if (weak_filter) {
         WeakVisFilter(problems, cameras, depths, weaks, confidences, dense_folder, skip_weaks);
@@ -1802,7 +1809,7 @@ void RunFusion_TAT_I(
     for (int i = 0; i < num_images; ++i) {
         std::cout << "Fusing image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
         const auto &problem = problems[i];
-        int ref_index = imageIdToindexMap[problem.ref_image_id];
+        int ref_index = imageIdToindexMap.at(problem.ref_image_id);
         const int cols = depths[ref_index].cols;
         const int rows = depths[ref_index].rows;
         int num_ngb = problem.src_image_ids.size();
@@ -1820,7 +1827,9 @@ void RunFusion_TAT_I(
 
                 float3 consistent_Point = PointX;
                 for (int j = 0; j < num_ngb; ++j) {
-                    int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+                    int src_index = src_slots[i][j];
+                    if (src_index < 0)
+                        continue;                            // unknown source id: diff[j] keeps FLT_MAX
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
@@ -1865,7 +1874,7 @@ void RunFusion_TAT_I(
                                                      (float) images[ref_index].at<cv::Vec3b>(r, c)[2]};
                         for (int j = 0; j < num_ngb; ++j) {
                             if (diff[j].use) {
-                                int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+                                int src_index = src_slots[i][j];
                                 consistent_Color[0] += (float) images[src_index].at<cv::Vec3b>(diff[j].src_r,
                                                                                                diff[j].src_c)[0];
                                 consistent_Color[1] += (float) images[src_index].at<cv::Vec3b>(diff[j].src_r,
@@ -1900,8 +1909,6 @@ void RunFusion_TAT_A(
     bool export_color
 ) {
     int num_images = problems.size();
-    path image_folder = dense_folder / path("images");
-    path cam_folder = dense_folder / path("cams");
     const float dist_base = 0.25f;
     const float depth_base = 1.0f / 3000.0f;
 
@@ -1910,69 +1917,18 @@ void RunFusion_TAT_A(
         memory_cache->img_cache.clear();
     }
 
-    std::vector<cv::Mat> images;
-    std::vector<Camera> cameras;
-    std::vector<cv::Mat> depths;
-    std::vector<cv::Mat> normals;
-    std::vector<cv::Mat> masks;
-    std::vector<cv::Mat> weaks;
-    std::vector<cv::Mat> confidences;
-    std::vector<cv::Mat> skip_weaks;
-    images.clear();
-    cameras.clear();
-    depths.clear();
-    normals.clear();
-    masks.clear();
-    weaks.clear();
-    confidences.clear();
-    skip_weaks.clear();
-    std::unordered_map<int, int> imageIdToindexMap;
-
-    for (int i = 0; i < num_images; ++i) {
-        const auto &problem = problems[i];
-        std::cout << "Reading image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
-        path image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + problem.img_ext);
-        imageIdToindexMap.emplace(problem.ref_image_id, i);
-        cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
-        path cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
-        Camera camera;
-        ReadCamera(cam_path, camera);
-        path depth_path = problem.result_folder / path("depths.bin");
-        path normal_path = problem.result_folder / path("normals.bin");
-        path weak_path = problem.result_folder / path("weak.bin");
-        path confidence_path = problem.result_folder / path("confidence.bin");
-        cv::Mat depth, normal, weak, confidence;
-        ReadBinMat(depth_path, depth);
-        ReadBinMat(normal_path, normal);
-        ReadBinMat(weak_path, weak);
-        ReadBinMat(confidence_path, confidence);
-        // check the size
-        if (normal.cols != depth.cols || normal.rows != depth.rows) {
-            std::cout << "Error: normal size is not equal to depth size" << std::endl;
-            continue;
-        }
-        if (weak.cols != depth.cols || weak.rows != depth.rows) {
-            std::cout << "Error: weak size is not equal to depth size" << std::endl;
-            continue;
-        }
-        if (confidence.cols != depth.cols || confidence.rows != depth.rows) {
-            std::cout << "Error: confidence size is not equal to depth size" << std::endl;
-            continue;
-        }
-
-        cv::Mat scaled_image;
-        RescaleImageAndCamera(image, scaled_image, depth, camera);
-        images.emplace_back(scaled_image);
-        cameras.emplace_back(camera);
-        depths.emplace_back(depth);
-        normals.emplace_back(normal);
-        cv::Mat mask = cv::Mat::zeros(depth.rows, depth.cols, CV_8UC1);
-        masks.emplace_back(mask);
-        weaks.emplace_back(weak);
-        cv::Mat skip_weak = cv::Mat::zeros(depth.rows, depth.cols, CV_8UC1);
-        skip_weaks.emplace_back(skip_weak);
-        confidences.emplace_back(confidence);
-    }
+    FusionViews views;
+    LoadFusionViews(dense_folder, problems, views);
+    std::vector<cv::Mat> &images = views.images;
+    std::vector<Camera> &cameras = views.cameras;
+    std::vector<cv::Mat> &depths = views.depths;
+    std::vector<cv::Mat> &normals = views.normals;
+    std::vector<cv::Mat> &masks = views.masks;
+    std::vector<cv::Mat> &weaks = views.weaks;
+    std::vector<cv::Mat> &confidences = views.confidences;
+    std::vector<cv::Mat> &skip_weaks = views.skip_weaks;
+    const std::unordered_map<int, int> &imageIdToindexMap = views.imageIdToindexMap;
+    const std::vector<std::vector<int>> src_slots = SourceSlots(problems, imageIdToindexMap);
 
     if (weak_filter) {
         WeakVisFilter(problems, cameras, depths, weaks, confidences, dense_folder, skip_weaks);
@@ -1996,7 +1952,7 @@ void RunFusion_TAT_A(
     for (int i = 0; i < num_images; ++i) {
         std::cout << "Fusing image " << std::setw(8) << std::setfill('0') << i << "..." << std::endl;
         const auto &problem = problems[i];
-        int ref_index = imageIdToindexMap[problem.ref_image_id];
+        int ref_index = imageIdToindexMap.at(problem.ref_image_id);
         const int cols = depths[ref_index].cols;
         const int rows = depths[ref_index].rows;
         int num_ngb = problem.src_image_ids.size();
@@ -2019,7 +1975,9 @@ void RunFusion_TAT_A(
                                              (float) images[ref_index].at<cv::Vec3b>(r, c)[2]};
 
                 for (int j = 0; j < num_ngb; ++j) {
-                    int src_index = imageIdToindexMap[problem.src_image_ids[j]];
+                    int src_index = src_slots[i][j];
+                    if (src_index < 0)
+                        continue;                            // unknown source id: diff[j] keeps FLT_MAX
                     const int src_cols = depths[src_index].cols;
                     const int src_rows = depths[src_index].rows;
                     float2 point;
