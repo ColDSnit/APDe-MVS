@@ -163,15 +163,16 @@ void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems
             if (!ref_ok) {
                 // no geometry to decide on: keep every source and say so once
                 std::cout << "WARNING: views.*_angle_deg: cam file of view " << problem.ref_image_id
-                          << " cannot be read; all its sources are kept" << std::endl;
+                          << " cannot be read; its sources are not filtered (PatchMatch stops on that file, "
+                          << "fusion excludes the view)" << std::endl;
                 kept = problem.src_image_ids;
             } else {
                 for (const int id: problem.src_image_ids) {
                     Camera src_camera;
                     if (!ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera)) {
+                        // without geometry the view cannot serve as a source (PatchMatch would stop on the file)
                         std::cout << "WARNING: views.*_angle_deg: cam file of view " << id << " cannot be read; it "
-                                  << "is kept as a source of view " << problem.ref_image_id << std::endl;
-                        kept.push_back(id);
+                                  << "is dropped as a source of view " << problem.ref_image_id << std::endl;
                     } else if (ViewAngleAllowed(ref_camera, src_camera, pipeline.view_min_angle_deg,
                                                 pipeline.view_max_angle_deg)) {
                         kept.push_back(id);

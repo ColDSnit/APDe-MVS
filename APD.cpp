@@ -1239,11 +1239,11 @@ void WeakVisFilter(
         const WeakFilterParams &wf = WeakFilterParams()
 ) {
     const int num_images = cameras.size();
-    // confidence at (r, c) read with the map's stored type: APD writes CV_8UC1; CV_32FC1 is accepted as well
-    // (LoadFusionViews admits no other type). Upstream read the 8-bit map with at<float>, i.e. it compared
-    // reinterpreted bytes and read past the end of the matrix in its last rows.
+    // confidence at (r, c) as stored: APD writes CV_8UC1 counts and LoadFusionViews admits no other type.
+    // Upstream read the 8-bit map with at<float>, i.e. it compared reinterpreted bytes and read past the end of
+    // the matrix in its last rows.
     const auto confidence_at = [](const cv::Mat &m, int r, int c) {
-        return m.type() == CV_32FC1 ? m.at<float>(r, c) : (float) m.at<uchar>(r, c);
+        return m.at<uchar>(r, c);
     };
     const auto task = [&](int ref_index) {
         if (depths[ref_index].empty())
@@ -1430,8 +1430,8 @@ static void LoadFusionViews(const path &dense_folder, const std::vector<Problem>
         } else if (confidence.cols != depth.cols || confidence.rows != depth.rows) {
             std::cout << "Error: confidence size is not equal to depth size" << std::endl;
             usable = false;
-        } else if (confidence.type() != CV_8UC1 && confidence.type() != CV_32FC1) {
-            std::cout << "Error: confidence map is neither CV_8UC1 nor CV_32FC1" << std::endl;
+        } else if (confidence.type() != CV_8UC1) {
+            std::cout << "Error: confidence map is not CV_8UC1" << std::endl;
             usable = false;
         } else if (image.empty()) {
             std::cout << "Error: cannot read " << image_path << std::endl;
@@ -1981,9 +1981,9 @@ void RunFusion_TAT_I(
         float dist;
         float depth;
         float angle;
-        int src_r;
-        int src_c;
-        bool use;
+        int src_r = -1;
+        int src_c = -1;
+        bool use = false;
 
         CostData() {
             dist = FLT_MAX;
