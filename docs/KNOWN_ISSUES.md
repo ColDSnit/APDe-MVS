@@ -23,7 +23,8 @@ fixes except the confidence read, the TaT reset and the PatchMatch input checks)
 ## fusion.occlusion_test (off by default): `occlusion_tol` on the mouse1 ctrl scene
 
 Scored with the v19deeplayer scoring (`score19.py`: v10sparse score, v13 eval, deep17, circ17, region
-coverage) after Recova's silhouette filter, binary 88fe833, v19 fusion options. "off" is byte-identical to
+coverage) after Recova's silhouette filter, binary c76644f (88fe833 gives the same fusion output on this
+scene), v19 fusion options. "off" is byte-identical to
 v19's control F0. Old = the pre-fix test (v19deeplayer SUMMARY, branch build 2e9f68e, whose
 output equals 2b89955; `occlusion_tol` 1e-4).
 
