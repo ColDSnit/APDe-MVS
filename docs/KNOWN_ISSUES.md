@@ -2,18 +2,14 @@
 
 Open points found while working on the fusion and PatchMatch input code.
 
-Fixed on 2026-10-08 and no longer listed: absolute `fusion.occlusion_tol`; occluders ignoring masks,
-see-through pixels and the angle window; the `operator[]` race in the occlusion support pre-pass; unknown
-source ids read as view 0; the short per-view vectors after a size mismatch; the "along its ray" wording; the
-silent TaT handling of `fusion.*`; `WeakVisFilter` reading the 8-bit confidence maps as float (past the end of
-the matrix); the TaT per-source comparison values not being reset per pixel; the PatchMatch input stage
-ignoring read failures (it now stops with an error naming the file).
+Items fixed on 2026-10-08 are described in the commits 2b89955..7f96e11 and 7713bbf, d2e67a8, c76644f.
 
 Reproducing pre-fix output: the weak-filter confidence fix can change default fusion output when the weak
 filter drops pixels (on the golden and mouse1 ctrl scenes it does not; see commit 7713bbf). Binaries with the
-old float read are kept in `D:\Reconstruction\build\apde-mvs-custom-pre-master-80476d0` (80476d0, before all
-of these fixes) and `D:\Reconstruction\build\apde-mvs-custom-pre-confidence-7f96e11` (7f96e11, all fusion
-fixes except the confidence read, the TaT reset and the PatchMatch input checks).
+old float read are kept on the lab workstation in `D:\Reconstruction\build\apde-mvs-custom-pre-master-80476d0`
+(80476d0, before all of these fixes) and `D:\Reconstruction\build\apde-mvs-custom-pre-confidence-7f96e11`
+(7f96e11, all fusion fixes except the confidence read, the TaT reset and the PatchMatch input checks).
+
 
 ## Tanks and Temples fusion (`--dataset TaT_a` / `TaT_i`)
 
@@ -23,8 +19,8 @@ fixes except the confidence read, the TaT reset and the PatchMatch input checks)
 ## fusion.occlusion_test (off by default): `occlusion_tol` on the mouse1 ctrl scene
 
 Scored with the v19deeplayer scoring (`score19.py`: v10sparse score, v13 eval, deep17, circ17, region
-coverage) after Recova's silhouette filter, binary c76644f (88fe833 gives the same fusion output on this
-scene), v19 fusion options. "off" is byte-identical to
+coverage) after Recova's silhouette filter, binary c76644f, v19 fusion options (the final build gives
+byte-identical APD.ply files for all five variants). "off" is byte-identical to
 v19's control F0. Old = the pre-fix test (v19deeplayer SUMMARY, branch build 2e9f68e, whose
 output equals 2b89955; `occlusion_tol` 1e-4).
 
@@ -38,10 +34,12 @@ output equals 2b89955; `occlusion_tol` 1e-4).
 | old, support >= 2 | - | 0.926 / 13.0 | 0.829 / 0.407 | 99.6 % | 34.4k | 625 / 3771 |
 | old, support >= 1 | - | 0.920 / 14.6 | 0.828 / 0.404 | 98.6 % | 28.5k | 290 / 3687 |
 
-- Open: on this scene `occlusion_tol = 1e-4` (0.1 mm) removes the same deep layer as the scale-free default
-  0 (687 vs 684 points, support >= 2; 441 vs 433, support >= 1) but keeps 126-190 more main-layer points and
-  20-28k more points overall, with equal completeness and coverage. The default 0 is kept because it does not
-  depend on the scene unit; for mouse1-type scenes (metres, ~15 um pixels) 1e-4 is the better setting.
+- Open: on this scene `occlusion_tol = 1e-4` (0.1 mm) removes the same deep layer as the scale-free default 0
+  (687 vs 684 points, support >= 2; 441 vs 433, support >= 1) but keeps 126-190 more main-layer points and
+  20-28k more points overall, with completeness and coverage equal to within 1e-4. The default 0 is kept
+  because it does not depend on the scene unit; for mouse1-type scenes (metres, ~15 um pixels) 1e-4 is the
+  better setting.
+
 - The fixed test removes less of the deep layer than the old one (support >= 1: 441 vs 290), because only
   pixels that fusion would accept count as occluders now, and keeps completeness and the hole area closer to
   "off". Whether the cloud or the mesh is better end to end (checkpoint chain, NCC, bumps) is not evaluated.

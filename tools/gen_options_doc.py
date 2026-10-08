@@ -14,7 +14,7 @@ INTRO = """# APD run-time options
 
 Every constant that upstream APDe-MVS hard-coded in the fusion, the weak-pixel filter, the coarse-to-fine
 schedule and the PatchMatch kernels is a run-time option in this fork. All defaults equal the upstream
-literals, so a run without options behaves like upstream.
+literals, so a run without options behaves like upstream, except for the fixes listed under Notes.
 
 ## How to set options
 
@@ -53,13 +53,19 @@ maps, and `patchmatch` when the depth maps must be recomputed.
   A source id in `pair.txt` that is not a reference view of the run is skipped with a warning (upstream read
   it as the first view, so such a scene fuses differently from upstream even with default options).
 - PatchMatch inputs: APD stops with an error naming the file when an image or cam file cannot be read, a
-  source image differs in size from the reference, or an intermediate map it needs (`depths.bin`, `normals.bin`,
-  `weak.bin`, `confidence.bin`) is missing, truncated, empty or of another type. A sa mask is optional: a
-  missing or empty one, or one that is not 1-channel 8-bit (`CV_8UC1`), gives a warning and that view runs
-  without it. With `views.*_angle_deg`, a source whose cam file cannot be read is dropped with a warning.
+  source image differs in size from the reference, or an intermediate map it needs (`depths.bin`,
+  `normals.bin`, `weak.bin`, `confidence.bin`) is missing, truncated, empty or of another type. A sa mask is
+  optional: a missing, unreadable or empty one, or one that is not 1-channel 8-bit (`CV_8UC1`), gives a
+  warning and that view runs without it. `pipeline.geom_iterations = 0` is refused with more than one scale
+  (the later scales need the `confidence.bin` that only the geometric passes write). With `views.*_angle_deg`,
+  a source whose cam file cannot be read is dropped with a warning.
+
 - The weak-pixel filter reads the 8-bit confidence maps as stored. Upstream (and this fork up to 7f96e11) read
   them as float, comparing reinterpreted bytes and reading past the end of the matrix in its last rows;
-  `weakfilter.confidence_as_uchar` is a no-op kept so that older config files still load.
+  `weakfilter.confidence_as_uchar` is a no-op kept so that older config files still load (APD warns when it
+  is set).
+- Tanks and Temples fusion: the per-source comparison values are reset at every pixel (upstream kept a skipped
+  source's values from an earlier pixel), so `--dataset TaT_a` / `TaT_i` output differs from upstream.
 
 ## Behind-surface test (`fusion.occlusion_test`)
 
