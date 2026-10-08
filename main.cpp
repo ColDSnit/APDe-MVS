@@ -157,13 +157,20 @@ void GenerateSampleList(const path &dense_folder, std::vector<Problem> &problems
         }
         if (use_angle_window) {
             Camera ref_camera;
-            ReadCamera(cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt"), ref_camera);
+            const bool ref_ok = ReadCamera(cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt"),
+                                           ref_camera);
             std::vector<int> kept;
             for (const int id: problem.src_image_ids) {
                 Camera src_camera;
-                ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera);
-                if (ViewAngleAllowed(ref_camera, src_camera, pipeline.view_min_angle_deg,
-                                     pipeline.view_max_angle_deg)) {
+                const bool src_ok = ReadCamera(cam_folder / path(ToFormatIndex(id) + "_cam.txt"), src_camera);
+                if (!ref_ok || !src_ok) {
+                    // no geometry to decide on: keep the source and say so
+                    std::cout << "WARNING: views.*_angle_deg: cam file of view " << (ref_ok ? id : problem.ref_image_id)
+                              << " cannot be read; source " << id << " of view " << problem.ref_image_id
+                              << " is kept" << std::endl;
+                    kept.push_back(id);
+                } else if (ViewAngleAllowed(ref_camera, src_camera, pipeline.view_min_angle_deg,
+                                            pipeline.view_max_angle_deg)) {
                     kept.push_back(id);
                 }
             }
@@ -381,6 +388,8 @@ int main(int argc, char **argv) {
     if ((only_fuse || !no_fuse) && (dataset == "TaT_a" || dataset == "TaT_i")) {
         const char *groups[] = {"fusion", "weakfilter"};
         for (const char *group: groups) {
+            if (!weak_filter && std::string(group) == "weakfilter")
+                continue;                                     // the weak filter does not run at all
             const std::vector<std::string> changed = registry.ChangedOptions(group);
             for (const std::string &name: changed) {
                 std::cout << "WARNING: " << name << " is set but --dataset " << dataset

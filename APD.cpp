@@ -37,22 +37,43 @@ bool ReadBinMat(const path &mat_path, cv::Mat &mat) {
     in.read((char *) (&cols), sizeof(int));
     in.read((char *) (&type), sizeof(int));
 
-    if (!in || version != 1 || rows < 0 || cols < 0) {
+    if (!in) {
+        in.close();
+        std::cout << "Error: " << mat_path << " is shorter than its 16-byte header" << std::endl;
+        return false;
+    }
+    if (version != 1) {
         in.close();
         std::cout << "Version error: " << mat_path << std::endl;
         return false;
+    }
+    if (rows < 0 || cols < 0 || (type & ~CV_MAT_TYPE_MASK) != 0) {
+        in.close();
+        std::cout << "Error: " << mat_path << " has an invalid header (" << rows << " x " << cols << ", type " << type
+                  << ")" << std::endl;
+        return false;
+    }
+    // bytes the header announces, and bytes the file still holds after the header
+    const long long expected_bytes = (long long) rows * (long long) cols * (long long) CV_ELEM_SIZE(type);
+    const std::streampos data_start = in.tellg();
+    in.seekg(0, std::ios_base::end);
+    const long long available_bytes = (long long) (in.tellg() - data_start);
+    in.seekg(data_start);
+    if (expected_bytes > available_bytes) {
+        std::cout << "Error: " << mat_path << " is shorter than its header says (" << available_bytes << " of "
+                  << expected_bytes << " data bytes); "
+                  << (available_bytes > 0 ? "the missing part is zero" : "not read") << std::endl;
+        if (available_bytes <= 0) {
+            in.close();
+            return false;                                    // header only: nothing to read, nothing to allocate
+        }
     }
 
     // a fresh zero-filled matrix: a file shorter than its header says leaves zeros (depth 0 = no depth) instead of
     // uninitialised memory, a complete file overwrites every byte, and a buffer the caller's mat shares with
     // another Mat is never written (assigning Mat::zeros directly would reuse it when size and type match)
     cv::Mat data = cv::Mat::zeros(rows, cols, type);         // new buffer (constructed, not assigned)
-    const std::streamsize expected = (std::streamsize) (data.step * data.rows);
-    in.read((char *) data.data, expected);
-    if (in.gcount() != expected) {
-        std::cout << "Error: " << mat_path << " is shorter than its header says; the missing part is zero"
-                  << std::endl;
-    }
+    in.read((char *) data.data, (std::streamsize) std::min(expected_bytes, available_bytes));
     in.close();
     mat = data;
     if (memory_cache != nullptr) {
@@ -568,7 +589,9 @@ void APD::InuputInitialization() {
     {
         path ref_cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
         Camera cam;
-        ReadCamera(ref_cam_path, cam);
+        if (!ReadCamera(ref_cam_path, cam)) {
+            std::cout << "Error: cannot read " << ref_cam_path << std::endl;
+        }
         cam.width = width;
         cam.height = height;
         cameras.push_back(cam);
@@ -577,7 +600,9 @@ void APD::InuputInitialization() {
     for (const auto &src_idx: problem.src_image_ids) {
         path src_cam_path = cam_folder / path(ToFormatIndex(src_idx) + "_cam.txt");
         Camera cam;
-        ReadCamera(src_cam_path, cam);
+        if (!ReadCamera(src_cam_path, cam)) {
+            std::cout << "Error: cannot read " << src_cam_path << std::endl;
+        }
         cam.width = width;
         cam.height = height;
         cameras.push_back(cam);
@@ -1280,8 +1305,9 @@ bool ViewAngleAllowed(const Camera &ref, const Camera &src, float min_deg, float
 }
 
 // Per-view inputs of the three fusion variants, in problem order: slot i always belongs to problems[i], and
-// imageIdToindexMap maps each reference id to its slot. A view whose result files are missing, of the wrong type
-// or of inconsistent sizes keeps its slot with empty matrices (depth 0 x 0), so it takes part in nothing but every
+// imageIdToindexMap maps each reference id to the slot of its first occurrence. A view whose result files are
+// missing, of the wrong type or of inconsistent sizes, whose image or cam file cannot be read, or whose reference id
+// repeats an earlier one keeps its slot with empty matrices (depth 0 x 0), so it takes part in nothing but every
 // index stays in range. Upstream skipped such a view after mapping its id, which shortened the vectors and shifted
 // every later view by one slot.
 struct FusionViews {
