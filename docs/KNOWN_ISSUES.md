@@ -13,6 +13,13 @@ size mismatch, the "along its ray" wording, the silent TaT handling of `fusion.*
   comparison there uses whatever lies after the buffer. Fixing it changes default output, so it is left to
   an explicit decision; `confidence_as_uchar = true` avoids it.
 
+## PatchMatch stage with missing or corrupt files (upstream behaviour)
+
+- `APD::InuputInitialization` ignores the results of `ReadBinMat` and `ReadCamera`. A missing, truncated or
+  corrupt intermediate `depths.bin` / `normals.bin` / `weak.bin` / `confidence.bin` (a truncated one is now
+  rejected like a missing one) ends in an OpenCV assertion in `cv::resize`; an unreadable cam file is reported
+  but the view is still processed with an unset camera. The fusion stage handles both (the view is excluded).
+
 ## Tanks and Temples fusion (`--dataset TaT_a` / `TaT_i`)
 
 - Both variants ignore `fusion.*` and `weakfilter.*` (they keep upstream's hard-coded thresholds and call
