@@ -566,6 +566,25 @@ APD::~APD() {
     }
 }
 
+// PatchMatch cannot run without one of its inputs: a missing or corrupt image, cam file or intermediate map stops
+// APD with a message naming the file (upstream went on and crashed in cv::resize or ran on an unset camera).
+static void StopOnInput(const std::string &problem_text, const path &file) {
+    std::cout << "ERROR: " << problem_text << ": " << file << " - APD stops" << std::endl;
+    exit(EXIT_FAILURE);
+}
+
+// Reads a BinMat that PatchMatch needs, of the given OpenCV type; stops APD when it is missing, empty or of
+// another type.
+static void ReadRequiredBinMat(const path &mat_path, int type, cv::Mat &mat) {
+    if (!ReadBinMat(mat_path, mat) || mat.empty()) {
+        StopOnInput("missing, truncated or empty map", mat_path);
+    }
+    if (mat.type() != type) {
+        StopOnInput("map of OpenCV type " + std::to_string(mat.type()) + " (expected " + std::to_string(type) + ")",
+                    mat_path);
+    }
+}
+
 void APD::InuputInitialization() {
     images.clear();
     cameras.clear();
@@ -579,7 +598,9 @@ void APD::InuputInitialization() {
     {
         path ref_image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + problem.img_ext);
         cv::Mat image_float;
-        ReadImage(ref_image_path, image_float);
+        if (!ReadImage(ref_image_path, image_float)) {
+            StopOnInput("cannot read the reference image", ref_image_path);
+        }
         images.push_back(image_float);
         width = image_float.cols;
         height = image_float.rows;
@@ -588,10 +609,14 @@ void APD::InuputInitialization() {
     for (const auto &src_idx: problem.src_image_ids) {
         path src_image_path = image_folder / path(ToFormatIndex(src_idx) + problem.img_ext);
         cv::Mat image_float;
-        ReadImage(src_image_path, image_float);
+        if (!ReadImage(src_image_path, image_float)) {
+            StopOnInput("cannot read a source image", src_image_path);
+        }
+        if (image_float.cols != width || image_float.rows != height) {
+            StopOnInput("source image size differs from the reference image (" + std::to_string(width) + " x " +
+                        std::to_string(height) + ")", src_image_path);
+        }
         images.push_back(image_float);
-        // assert: images_float.cols == width;
-        // assert: images_float.rows == height;
     }
     if (images.size() > MAX_IMAGES) {
         std::cout << "Can't process so much images: " << images.size() << std::endl;
@@ -604,7 +629,7 @@ void APD::InuputInitialization() {
         path ref_cam_path = cam_folder / path(ToFormatIndex(problem.ref_image_id) + "_cam.txt");
         Camera cam;
         if (!ReadCamera(ref_cam_path, cam)) {
-            std::cout << "Error: cannot read " << ref_cam_path << std::endl;
+            StopOnInput("cannot read the cam file", ref_cam_path);
         }
         cam.width = width;
         cam.height = height;
@@ -615,7 +640,7 @@ void APD::InuputInitialization() {
         path src_cam_path = cam_folder / path(ToFormatIndex(src_idx) + "_cam.txt");
         Camera cam;
         if (!ReadCamera(src_cam_path, cam)) {
-            std::cout << "Error: cannot read " << src_cam_path << std::endl;
+            StopOnInput("cannot read the cam file", src_cam_path);
         }
         cam.width = width;
         cam.height = height;
@@ -677,13 +702,13 @@ void APD::InuputInitialization() {
         depths.clear();
         path ref_depth_path = problem.result_folder / path("depths.bin");
         cv::Mat ref_depth;
-        ReadBinMat(ref_depth_path, ref_depth);
+        ReadRequiredBinMat(ref_depth_path, CV_32FC1, ref_depth);
         depths.push_back(ref_depth);
         for (const auto &src_idx: problem.src_image_ids) {
             path src_depth_path =
                     problem.dense_folder / path("APD") / path(ToFormatIndex(src_idx)) / path("depths.bin");
             cv::Mat src_depth;
-            ReadBinMat(src_depth_path, src_depth);
+            ReadRequiredBinMat(src_depth_path, CV_32FC1, src_depth);
             depths.push_back(src_depth);
         }
         for (auto &depth: depths) {
@@ -698,8 +723,8 @@ void APD::InuputInitialization() {
     if (params_host.use_APD) {
         path weak_info_path = problem.result_folder / path("weak.bin");
         path confidence_path = problem.result_folder / path("confidence.bin");
-        ReadBinMat(weak_info_path, weak_info_host);
-        ReadBinMat(confidence_path, confidence_host);
+        ReadRequiredBinMat(weak_info_path, CV_8UC1, weak_info_host);
+        ReadRequiredBinMat(confidence_path, CV_8UC1, confidence_host);    // uploaded to the GPU as uchar
         if (weak_info_host.cols != width || weak_info_host.rows != height) {
             std::cout << "resize weak info to target size\n";
             cv::resize(weak_info_host, weak_info_host, cv::Size(width, height), 0, 0, cv::INTER_NEAREST);
@@ -725,7 +750,14 @@ void APD::InuputInitialization() {
         if (params_host.use_sa) {
             if (exists(sa_mask_folder)) {
                 path sa_mask_path = sa_mask_folder / path(ToFormatIndex(problem.ref_image_id) + ".bin");
-                ReadBinMat(sa_mask_path, sa_mask_host);
+                cv::Mat sa;
+                if (!ReadBinMat(sa_mask_path, sa) || sa.empty() || sa.type() != CV_8UC1) {
+                    // optional input (upstream also ran without it): this view runs without a sa mask
+                    std::cout << "WARNING: no usable sa mask " << sa_mask_path
+                              << " (missing, empty or not CV_8UC1); none used for this view" << std::endl;
+                } else {
+                    sa_mask_host = sa;
+                }
                 if (sa_mask_host.cols != width || sa_mask_host.rows != height) {
                     std::cout << "resize sa mask to target size\n";
                     cv::resize(sa_mask_host, sa_mask_host, cv::Size(width, height), 0, 0, cv::INTER_NEAREST);
@@ -748,8 +780,8 @@ void APD::InuputInitialization() {
         path depth_path = problem.result_folder / path("depths.bin");
         path normal_path = problem.result_folder / path("normals.bin");
         cv::Mat depth, normal;
-        ReadBinMat(depth_path, depth);
-        ReadBinMat(normal_path, normal);
+        ReadRequiredBinMat(depth_path, CV_32FC1, depth);
+        ReadRequiredBinMat(normal_path, CV_32FC3, normal);
         if (depth.cols != width || depth.rows != height || normal.cols != width || normal.rows != height) {
             std::cout << "resize depth and normal to target size\n";
             cv::resize(depth, depth, cv::Size(width, height), 0, 0, cv::INTER_NEAREST);
