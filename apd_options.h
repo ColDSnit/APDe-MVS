@@ -43,6 +43,14 @@ struct FusionParams {
                                            // al. 2016, sigma 45 deg): weights each source term and the reference score
     int silhouette_trim_px = 0;            // 0 disables; else pixels within this many depth-map pixels of the view's own
                                            // silhouette edge (scene/sa_masks, nonzero = object) take no part in fusion
+    // Behind-surface (free-space) test (feat/deep-layer-occlusion-test; off by default = upstream behaviour).
+    bool occlusion_test = false;           // true: weakly supported points lying behind a better-supported surface seen
+                                           // by another view are rejected (see the next four options)
+    int occlusion_max_support = 1;         // only reference pixels with at most this many agreeing sources are tested
+    int occlusion_min_support = 2;         // an occluding pixel needs at least this many agreeing sources of its own
+    float occlusion_tol = 1e-4f;           // world units along the occluding view's ray by which the surface must be in front
+    float occlusion_min_cos = 0.2f;        // a view counts only if the point's and the occluder's normals both face it
+                                           // with at least this cosine (back sides and grazing limb pixels never count)
 };
 
 // Options of WeakVisFilter (drops WEAK pixels that other views see through).
